@@ -1,0 +1,6 @@
+{
+  "name": "Phoenix Elétrica - Distribuidora de Materiais Elétricos",
+  "description": "Landing page de alta conversão para Phoenix Elétrica com captação de orçamentos, salvamento em banco SQL e redirecionamento automático para WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

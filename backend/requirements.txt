@@ -1,0 +1,14 @@
+# Dependências do Backend Phoenix Elétrica
+# Para instalar: pip install -r requirements.txt
+
+# Opção 1 (Recomendada): FastAPI com Uvicorn
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+pydantic>=2.0.0
+
+# Opção 2: Flask (se preferir rodar com python flask_app.py)
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Ferramenta para testes de requisições
+requests>=2.31.0
