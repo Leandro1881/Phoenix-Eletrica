@@ -1,8 +1,10 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import initSqlJs, { Database } from 'sql.js';
+import { GoogleGenAI } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +13,111 @@ const PORT = 3000;
 const DB_PATH = path.join(process.cwd(), 'phoenix_eletrica.db');
 
 let db: Database | null = null;
+
+// Normaliza especificações técnicas e corrige typos de teclado mobile (ex: 15.mm2 -> 1,5mm²)
+function normalizeSpec(text: string): string {
+  let s = text.trim();
+  s = s.replace(/\b15\.?mm[²2]?\b/gi, '1,5mm²');
+  s = s.replace(/\b1[.,]5\s*mm[²2]?\b/gi, '1,5mm²');
+  s = s.replace(/\b25\.?mm[²2]?\b/gi, '2,5mm²');
+  s = s.replace(/\b2[.,]5\s*mm[²2]?\b/gi, '2,5mm²');
+  s = s.replace(/\b4\.?0?\s*mm[²2]?\b/gi, '4mm²');
+  s = s.replace(/\b6\.?0?\s*mm[²2]?\b/gi, '6mm²');
+  s = s.replace(/\b10\.?0?\s*mm[²2]?\b/gi, '10mm²');
+  s = s.replace(/\b16\.?0?\s*mm[²2]?\b/gi, '16mm²');
+  s = s.replace(/²+/g, '²');
+  s = s.replace(/\bcore\s+/gi, 'cor ');
+  return s;
+}
+
+function formatCableItem(c: { quantity?: string; gauge?: string; color?: string; name?: string }): string {
+  const parts: string[] = [];
+  if (c.quantity) {
+    parts.push(c.quantity);
+    parts.push('de');
+  }
+  parts.push(c.name || 'cabo flexível');
+  if (c.gauge) parts.push(c.gauge);
+  if (c.color) parts.push(`- ${c.color}`);
+  const raw = parts.join(' ').replace(/\s+/g, ' ').trim();
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function consolidateMaterials(rawCandidates: string[]): string[] {
+  if (rawCandidates.length === 0) return [];
+  if (rawCandidates.length === 1) {
+    const single = normalizeSpec(rawCandidates[0]);
+    if (/^\d+\s*rolos?$/i.test(single)) {
+      return [`${single} de cabo flexível`];
+    }
+    return [single];
+  }
+
+  const result: string[] = [];
+  let pendingCable: { quantity?: string; gauge?: string; color?: string; name?: string } | null = null;
+
+  for (const item of rawCandidates) {
+    const norm = normalizeSpec(item);
+    const lower = norm.toLowerCase();
+
+    const isDistinctNonCable = 
+      lower.includes('iluminação') || lower.includes('led') || lower.includes('lâmpada') || 
+      lower.includes('refletor') || lower.includes('fita') || lower.includes('eletroduto') || 
+      lower.includes('tomada') || lower.includes('interruptor') || lower.includes('caixa 4x2') || 
+      lower.includes('canaleta') || lower.includes('disjuntor') || lower.includes('wago');
+
+    if (isDistinctNonCable) {
+      if (pendingCable) {
+        result.push(formatCableItem(pendingCable));
+        pendingCable = null;
+      }
+      result.push(norm);
+      continue;
+    }
+
+    const isCableRelated = 
+      lower.includes('cabo') || lower.includes('fio') || lower.includes('rolo') || 
+      /\b\d+([.,]\d+)?\s*mm[²2]?\b/i.test(lower) || 
+      lower.includes('cor azul') || lower.includes('cor preta') || lower.includes('cor vermelho') ||
+      lower.includes('azul') || lower.includes('preto') || lower.includes('vermelho') || 
+      lower.includes('verde') || lower.includes('amarelo') || lower.includes('branco');
+
+    if (isCableRelated) {
+      if (!pendingCable) {
+        pendingCable = {};
+      }
+
+      const qtyMatch = norm.match(/\b(\d+\s*(rolos?|metros?|m))\b/i);
+      if (qtyMatch) {
+        pendingCable.quantity = qtyMatch[1];
+      }
+
+      const gaugeMatch = norm.match(/(\d+([.,]\d+)?\s*mm[²2]?)/i);
+      if (gaugeMatch) {
+        pendingCable.gauge = gaugeMatch[1];
+      }
+
+      const colorMatch = norm.match(/\b(cor\s+)?(azul|preto|vermelho|verde|amarelo|branco|cinza)\b/i);
+      if (colorMatch) {
+        pendingCable.color = colorMatch[0].toLowerCase().startsWith('cor ') ? colorMatch[0] : `cor ${colorMatch[0]}`;
+      }
+
+      if (lower.includes('flexível') || lower.includes('flexivel')) {
+        pendingCable.name = 'cabo flexível';
+      }
+
+      continue;
+    }
+
+    result.push(norm);
+  }
+
+  if (pendingCable) {
+    result.push(formatCableItem(pendingCable));
+  }
+
+  return result.filter(Boolean);
+}
 
 // Inicialização do Banco SQLite
 async function setupDatabase() {
@@ -412,6 +519,507 @@ async function startServer() {
       return res.status(500).json({
         status: 'error',
         message: 'Falha ao processar o upload do arquivo',
+        detail: err.message
+      });
+    }
+  });
+
+  // Rota POST: Assistente IA de Orçamento da Phoenix Elétrica (com Guardrails Estritos)
+  app.post('/api/chat-assistant', async (req, res) => {
+    try {
+      const { messages } = req.body;
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Histórico de mensagens é obrigatório.'
+        });
+      }
+
+      const PHOENIX_SYSTEM_PROMPT = `És um assistente técnico de vendas da Phoenix Elétrica, em São Paulo. A tua ÚNICA função é ajudar o cliente a montar uma lista de materiais elétricos clara para orçamento. REGRAS ESTRITAS: 1. NUNCA forneça preços, descontos ou prazos. Responda que o balcão calculará isso. 2. Se o assunto não for material elétrico/obras, responda EXATAMENTE: 'Sou especialista apenas em materiais elétricos. Como posso ajudar com a sua lista?'. 3. Sugira itens complementares lógicos (ex: fita isolante para cabos), mas se o cliente dispensar ou disser que não precisa, NÃO inclua na lista. 4. Mantenha as respostas curtas e objetivas. 5. Quando o cliente finalizar a lista, retorne a lista estruturada contendo ESTRITAMENTE os materiais confirmados ou pedidos pelo cliente na conversa (sem adicionar itens que o cliente não pediu ou dispensou), com marcadores (•), e confirme que está pronta para envio ao balcão.`;
+
+      // 1. Prioridade para Gemini API se GEMINI_API_KEY ou VITE_GEMINI_API_KEY estiver configurado
+      const geminiApiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+      if (geminiApiKey) {
+        try {
+          const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+          
+          // Gemini exige que a primeira mensagem em contents seja do usuário (role: user)
+          const firstUserIdx = messages.findIndex((m: any) => (m.role === 'user' || m.sender === 'user'));
+          const validMessages = firstUserIdx >= 0 ? messages.slice(firstUserIdx) : messages;
+
+          const contents = validMessages.map((m: any) => ({
+            role: (m.role === 'assistant' || m.sender === 'assistant') ? 'model' : 'user',
+            parts: [{ text: String(m.text || m.content || '') }]
+          }));
+
+          const geminiResponse = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents,
+            config: {
+              systemInstruction: PHOENIX_SYSTEM_PROMPT,
+              temperature: 0.2,
+            }
+          });
+
+          if (geminiResponse.text) {
+            return res.status(200).json({
+              status: 'success',
+              provider: 'gemini',
+              text: geminiResponse.text.trim()
+            });
+          }
+        } catch (geminiError: any) {
+          console.warn('Erro ao processar chamada Gemini no servidor:', geminiError?.message || geminiError);
+        }
+      }
+
+      // 2. Se houver OPENAI_API_KEY ou VITE_OPENAI_API_KEY configurado
+      const openAiApiKey = process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY;
+      if (openAiApiKey) {
+        try {
+          const openAiMessages = [
+            { role: 'system', content: PHOENIX_SYSTEM_PROMPT },
+            ...messages.map((m: any) => ({
+              role: (m.role === 'assistant' || m.sender === 'assistant') ? 'assistant' : 'user',
+              content: String(m.text || m.content || '')
+            }))
+          ];
+
+          const openAiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${openAiApiKey}`
+            },
+            body: JSON.stringify({
+              model: 'gpt-4o-mini',
+              messages: openAiMessages,
+              temperature: 0.2,
+            })
+          });
+
+          if (openAiRes.ok) {
+            const data: any = await openAiRes.json();
+            const text = data.choices?.[0]?.message?.content;
+            if (text) {
+              return res.status(200).json({
+                status: 'success',
+                provider: 'openai',
+                text: text.trim()
+              });
+            }
+          }
+        } catch (openAiError: any) {
+          console.warn('Erro ao processar chamada OpenAI no servidor:', openAiError?.message || openAiError);
+        }
+      }
+
+      // 3. Fallback inteligente com Guardrails estritos e tratamento contextual de intenções
+      const lastMsg = String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').toLowerCase().trim();
+      
+      // Intent 1: Saudações educadas
+      const isGreeting = 
+        /^(oi|ola|olá|opa|bom dia|boa tarde|boa noite|como vai|tudo bem|e ai|e aí|salve|fala|oie)(\s+(como vai|tudo bem|amigo|phoenix|boa tarde|bom dia|boa noite))?[!?.]*$/i.test(lastMsg) ||
+        lastMsg === 'oi como vai' || 
+        lastMsg === 'ola tudo bem' || 
+        lastMsg === 'olá tudo bem' || 
+        lastMsg === 'tudo bem?' || 
+        lastMsg === 'tudo bem' ||
+        lastMsg === 'oi, tudo bem?' ||
+        lastMsg === 'oi como voce esta';
+
+      if (isGreeting) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Olá! Tudo bem? Sou o assistente técnico de vendas da Phoenix Elétrica, em São Paulo. Me diga que tipo de obra ou reforma você vai fazer (ou quais materiais elétricos você já sabe que precisa) e eu te ajudo a estruturar uma lista completa para orçamento!'
+        });
+      }
+
+      // Intent 2: Agradecimentos
+      const isThanks = /^(obrigado|obrigada|valeu|muito obrigado|agradeço|show|beleza|blz|perfeito|otimo|ótimo)[!?.]*$/i.test(lastMsg);
+      if (isThanks) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'À disposição! Se precisar adicionar mais algum material elétrico ou conferir a relação antes de falar com nosso balcão, estou por aqui.'
+        });
+      }
+
+      // Intent 3: Guardrail 1 - Preço e Prazo
+      if (
+        lastMsg.includes('preço') || 
+        lastMsg.includes('quanto custa') || 
+        lastMsg.includes('valor') || 
+        lastMsg.includes('desconto') || 
+        lastMsg.includes('prazo') ||
+        lastMsg.includes('entrega em quanto tempo') ||
+        lastMsg.includes('quanto fica')
+      ) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Nossos preços, descontos e prazos de entrega são calculados diretamente pelo balcão técnico da Phoenix Elétrica. Vamos finalizar os materiais necessários da sua lista primeiro?'
+        });
+      }
+
+      // Intent 4: Guardrail 5 - Finalização da Lista
+      if (
+        lastMsg.includes('finalizar') || 
+        lastMsg.includes('só isso') || 
+        lastMsg.includes('é isso') || 
+        lastMsg.includes('concluir') || 
+        lastMsg.includes('está pronta') ||
+        lastMsg.includes('pode fechar') ||
+        lastMsg === 'pronto' ||
+        lastMsg === 'pode gerar'
+      ) {
+        // Extrai apenas os itens de materiais elétricos solicitados pelo cliente na conversa
+        const ignorePatterns = [
+          /^(oi|ola|olá|bom dia|boa tarde|boa noite|como vai|tudo bem|opa|salve)[!?.]*$/i,
+          /^(finalizar|concluir|fechar|pode fechar|pode finalizar|está pronta|esta pronta|pronto|pronta|gerar lista)[!?.]*$/i,
+          /^(nao|não|apenas|só|so|isso|apenas isso|so isso|só isso|somente isso|não precisa|nao precisa|dispensa|nenhum|nada|nada mais)[!?., ]*$/i,
+          /^(nao|não)[, ]+(apenas|só|so|isso|apenas isso|so isso|só isso|somente isso|nada mais)[!?., ]*$/i,
+          /^(sim|pode ser|ok|beleza|blz|perfeito|otimo|ótimo|obrigado|obrigada|valeu)[!?.]*$/i,
+          /^(quanto custa|qual o preço|qual o preco|quanto fica)[!?.]*$/i
+        ];
+
+        const nonMaterialWords = ['isso', 'apenas', 'so', 'só', 'nada', 'nenhum', 'tudo', 'ok', 'sim', 'nao', 'não', 'pronto', 'obrigado', 'valeu'];
+
+        const userMsgs = messages.filter((m: any) => m.role === 'user' || m.sender === 'user');
+        const candidateItems: string[] = [];
+
+        for (const m of userMsgs) {
+          const raw = String(m.text || m.content || '').trim();
+          if (!raw) continue;
+
+          // Remove emojis gráficos reais no início (ex: 💡, 🔌, ⚡, 🏗️) sem remover números (como 3 rolos)
+          let cleaned = raw.replace(/^[\p{Extended_Pictographic}\s]+/u, '').trim();
+          const lowerCleaned = cleaned.toLowerCase();
+
+          if (
+            lowerCleaned.includes('finalizar') ||
+            lowerCleaned.includes('fechar') ||
+            lowerCleaned.includes('concluir') ||
+            lowerCleaned.includes('só isso') ||
+            lowerCleaned.includes('é isso') ||
+            lowerCleaned.includes('está pronta') ||
+            lowerCleaned.includes('esta pronta') ||
+            ignorePatterns.some(pat => pat.test(lowerCleaned))
+          ) {
+            continue;
+          }
+
+          cleaned = cleaned
+            .replace(/^(nao,\s*apenas|não,\s*apenas|nao\s+apenas|não\s+apenas|apenas|só|so)\s+/i, '')
+            .replace(/^(preciso de|preciso|quero|vou precisar de|vou usar|coloque|adicione|adiciona|me vê|me ve|gostaria de|inclua|incluir)\s+/i, '')
+            .trim();
+
+          if (ignorePatterns.some(pat => pat.test(cleaned.toLowerCase()))) continue;
+
+          if (nonMaterialWords.includes(cleaned.toLowerCase())) continue;
+
+          if (cleaned.length > 2) {
+            const formatted = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+            if (!candidateItems.some(it => it.toLowerCase() === formatted.toLowerCase())) {
+              candidateItems.push(formatted);
+            }
+          }
+        }
+
+        if (candidateItems.length === 0) {
+          const allUserText = userMsgs.map((m: any) => String(m.text || m.content || '')).join(' ').toLowerCase();
+          if (allUserText.includes('fita')) candidateItems.push('Fita isolante');
+          if (allUserText.includes('led') || allUserText.includes('iluminação') || allUserText.includes('lâmpada')) candidateItems.push('Iluminação LED');
+          if (allUserText.includes('cabo') || allUserText.includes('fio')) candidateItems.push('Cabos elétricos conforme especificação');
+          if (allUserText.includes('disjuntor')) candidateItems.push('Disjuntores termomagnéticos');
+          if (allUserText.includes('tomada') || allUserText.includes('interruptor')) candidateItems.push('Conjuntos de tomadas / interruptores');
+        }
+
+        if (candidateItems.length === 0) {
+          candidateItems.push('Materiais elétricos solicitados na conversa');
+        }
+
+        const consolidated = consolidateMaterials(candidateItems);
+        const finalItems = consolidated.length > 0 ? consolidated : ['Materiais elétricos solicitados na conversa'];
+        const bullets = finalItems.map(item => `• ${item}`).join('\n');
+
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: `Perfeito! Aqui está a sua lista final estruturada para o orçamento:\n\n${bullets}\n\nA lista está pronta para envio! Basta clicar em "Usar esta Lista no Orçamento" para enviar direto ao WhatsApp da Phoenix Elétrica.`
+        });
+      }
+
+      // Termos elétricos e de infraestrutura
+      const electricalTerms = [
+        'cabo', 'fio', 'disjuntor', 'tomada', 'interruptor', 'led', 'lâmpada', 'lampada', 'refletor',
+        'eletroduto', 'corrugado', 'fita', 'isolante', 'quadro', 'distribuição', 'distribuicao', 'trifásico',
+        'bifásico', 'monofásico', 'dr', 'dps', 'barramento', 'canaleta', 'perfilado',
+        'eletrocalha', 'reator', 'contator', 'relé', 'rele', 'conector', 'wago', 'obra', 'instalação',
+        'instalacao', 'reforma', 'energia', 'volts', 'amperes', '110v', '220v', 'dimmer', 'sensor', 'fotocélula',
+        'fotocelula', 'plafon', 'spot', 'soquete', 'chuveiro', 'lista', 'orçamento', 'orcamento', 'materiais', 'fiação',
+        'fiacao', 'conduíte', 'conduite', 'caixinha', '4x2', '4x4', 'curva', 'luva'
+      ];
+
+      // Unidades de medidas e quantidades usadas em materiais elétricos
+      const measurementAndQuantityTerms = [
+        'rolo', 'rolos', 'metro', 'metros', 'm', 'mm', 'mm²', 'peça', 'peças', 'peca', 'pecas',
+        'unidade', 'unidades', 'un', 'barra', 'barras', 'caixa', 'caixas', 'pacote', 'pacotes',
+        'cento', 'kit', 'kits', 'bobina', 'bobinas', 'par', 'pares', 'circuito', 'circuitos'
+      ];
+
+      // Respostas conversacionais a perguntas anteriores (sim, não, apenas, etc.)
+      const conversationalAnswerPatterns = [
+        'sim', 'nao', 'não', 'apenas', 'so', 'só', 'somente', 'pode ser', 'não precisa', 'nao precisa',
+        'dispensa', 'quero', 'vou querer', 'prefiro', 'coloque', 'adicione', 'inclua', 'pode colocar',
+        'pode incluir', 'só isso', 'apenas isso', 'já tenho', 'ja tenho', 'de 100', 'de 50', 'de 25'
+      ];
+
+      // Atributos e especificações técnicas de materiais elétricos
+      const electricalAttributes = [
+        'azul', 'vermelho', 'preto', 'verde', 'amarelo', 'branco', 'cinza',
+        'monopolar', 'bipolar', 'tripolar', 'tetrapolar', 'din', 'nema',
+        '10a', '16a', '20a', '25a', '32a', '40a', '50a', '63a', '70a', '80a', '100a',
+        '110v', '127v', '220v', '380v', 'bivolt', 'monofasico', 'bifasico', 'trifasico',
+        'monofásico', 'bifásico', 'trifásico', '1,5', '2,5', '1.5', '2.5', '4', '6', '10', '16', '25', '35', '50', '70', '95', '120'
+      ];
+
+      const isElectrical = electricalTerms.some(term => lastMsg.includes(term));
+      const hasQuantityOrUnit = measurementAndQuantityTerms.some(term => new RegExp(`\\b${term}\\b`, 'i').test(lastMsg));
+      const hasConversationalAnswer = conversationalAnswerPatterns.some(term => lastMsg.includes(term));
+      const hasElectricalAttribute = electricalAttributes.some(term => new RegExp(`\\b${term}\\b`, 'i').test(lastMsg));
+      const hasNumbers = /\d+/.test(lastMsg);
+
+      // Contexto prévio de materiais elétricos na conversa
+      const previousHistoryText = messages
+        .slice(0, -1)
+        .map((m: any) => String(m.text || m.content || ''))
+        .join(' ')
+        .toLowerCase();
+      const hadElectricalContext = electricalTerms.some(term => previousHistoryText.includes(term));
+
+      const isContextualElectricalReply = 
+        hadElectricalContext && 
+        (hasQuantityOrUnit || hasConversationalAnswer || hasElectricalAttribute || hasNumbers);
+
+      // Intent 5: Guardrail 2 - Assunto não relacionado a materiais elétricos
+      if (!isElectrical && !isContextualElectricalReply) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Sou especialista apenas em materiais elétricos. Como posso ajudar com a sua lista?'
+        });
+      }
+
+      // Intent 6: Tratamento de respostas contextuais de quantidades e especificações (ex: "nao apenas 3 rolos, de 100 m")
+      if (isContextualElectricalReply && !isElectrical) {
+        if (lastMsg.includes('rolo') || lastMsg.includes('metro') || lastMsg.includes('100') || lastMsg.includes('50') || lastMsg.includes('cabo')) {
+          const rawText = String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim();
+          const cleanQty = rawText
+            .replace(/^(preciso de|quero|me vê|vou usar|adicione|adicionar)\s+/i, '')
+            .replace(/^(nao,\s*apenas|não,\s*apenas|apenas|só|so)\s+/i, '')
+            .trim();
+          const hasNegation = lastMsg.includes('nao') || lastMsg.includes('não') || lastMsg.includes('apenas') || lastMsg.includes('dispensa');
+          const negationNote = hasNegation ? ' (sem os itens complementares)' : '';
+
+          return res.status(200).json({
+            status: 'success',
+            provider: 'guardrail-fallback',
+            text: `Entendido! Anotei a quantidade: ${cleanQty} de cabo flexível${negationNote}. Quais bitolas ou cores você vai precisar para esses cabos (ex: 1,5mm² ou 2,5mm² nas cores azul, preto ou vermelho)? Se já estiver tudo definido, posso fechar a lista para o orçamento!`
+          });
+        }
+
+        if (hasElectricalAttribute) {
+          const rawText = String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim();
+          const normSpec = normalizeSpec(rawText);
+          const allPrevText = messages.slice(0, -1).map((m: any) => String(m.text || m.content || '')).join(' ').toLowerCase();
+          const prevQtyMatch = allPrevText.match(/\b(\d+\s*rolos?)\b/i);
+          const qtyPrefix = prevQtyMatch ? `${prevQtyMatch[1]} de cabo flexível ` : '';
+
+          return res.status(200).json({
+            status: 'success',
+            provider: 'guardrail-fallback',
+            text: `Perfeito! Atualizei sua lista com: ${qtyPrefix}${normSpec}. Deseja adicionar mais algum material elétrico à sua relação ou podemos finalizar e gerar a lista para o balcão?`
+          });
+        }
+
+        if (lastMsg.includes('nao') || lastMsg.includes('não') || lastMsg.includes('apenas') || lastMsg.includes('dispensa')) {
+          return res.status(200).json({
+            status: 'success',
+            provider: 'guardrail-fallback',
+            text: `Entendido, mantemos apenas os itens que você solicitou, sem os adicionais. Mais algum material elétrico que deseja incluir ou podemos finalizar a lista para o orçamento?`
+          });
+        }
+
+        if (lastMsg.includes('sim') || lastMsg.includes('pode') || lastMsg.includes('quero') || lastMsg.includes('adicione')) {
+          return res.status(200).json({
+            status: 'success',
+            provider: 'guardrail-fallback',
+            text: `Excelente! Incluí os itens complementares de instalação na sua relação. Quantas peças ou metros estima para cada um? Se preferir, já podemos estruturar a lista para o balcão!`
+          });
+        }
+
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: `Anotado: ${String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim()}. Deseja incluir mais algum item ou podemos fechar a sua lista de materiais elétricos para o balcão da Phoenix Elétrica?`
+        });
+      }
+
+      // Intent 6.5: Reforma Elétrica Residencial ou Predial
+      if (
+        lastMsg.includes('reforma') || 
+        lastMsg.includes('reformar') || 
+        lastMsg.includes('fiação') || 
+        lastMsg.includes('fiacao') || 
+        lastMsg.includes('afiação') || 
+        lastMsg.includes('afiacao') || 
+        lastMsg.includes('casa') || 
+        lastMsg.includes('apartamento') || 
+        lastMsg.includes('residencial')
+      ) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: `Excelente! Para a reforma ou troca de fiação de uma casa com total segurança e conforme as normas da NBR 5410, estruturei esta relação básica de materiais essenciais:\n\n` +
+            `• Cabos flexíveis 750V 1,5mm² (iluminação - cores azul, vermelho/preto e verde)\n` +
+            `• Cabos flexíveis 750V 2,5mm² (tomadas de uso geral TUGs - azul, vermelho e verde)\n` +
+            `• Cabos flexíveis 750V 4mm² ou 6mm² (circuito independente de chuveiro elétrico e ar-condicionado)\n` +
+            `• Quadro de distribuição de embutir (com barramento de cobre tipo pente)\n` +
+            `• Disjuntor geral bipolar/tripolar e mini disjuntores DIN Curva C (10A, 16A, 20A e 32A)\n` +
+            `• Dispositivo DR (IDR 30mA) para proteção obrigatória contra choques elétricos\n` +
+            `• Protetor de Surtos DPS Classe II para proteger eletrodomésticos contra descargas atmosféricas\n` +
+            `• Eletrodutos corrugados reforçados 25mm e 32mm para passagem dos condutores\n` +
+            `• Caixas de embutir 4x2 e 4x4 e conjuntos de tomadas 10A e 20A com placas\n` +
+            `• Fita isolante 3M antichama, passa-fio e conectores de emenda rápida\n\n` +
+            `Quantos cômodos tem a sua casa ou qual a metragem aproximada para estimarmos as quantidades de rolos? Se preferir, você já pode clicar em "Usar Esta Lista no Orçamento" para cotar estes itens no balcão!`
+        });
+      }
+
+      // Intent 7: Sugestões específicas conforme o material mencionado (Guardrail 3 e 4)
+      if (lastMsg.includes('cabo') || lastMsg.includes('fio')) {
+        if (hasNumbers || hasQuantityOrUnit) {
+          return res.status(200).json({
+            status: 'success',
+            provider: 'guardrail-fallback',
+            text: `Perfeito! Anotei: ${String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim()}. Para a instalação desses cabos, você também vai precisar de fita isolante 3M, passa-fio, conectores de emenda (tipo Wago) e eletrodutos corrugados? Quais cores ou bitolas deseja especificar?`
+          });
+        }
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Entendido. Para a passagem dos cabos, você também vai precisar de fita isolante 3M, passa-fio, conectores de emenda (tipo Wago) e eletrodutos corrugados? Quantos metros ou rolos estima para cada circuito?'
+        });
+      }
+
+      if (lastMsg.includes('disjuntor') || lastMsg.includes('quadro')) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Certo. Para o quadro de distribuição, recomendo incluir: Disjuntor Geral, Disjuntores parciais para circuitos, Dispositivo DR (diferencial residual contra choques), DPS contra surtos e barramento de cobre tipo pente. Deseja adicionar barramento e DR?'
+        });
+      }
+
+      if (lastMsg.includes('iluminação') || lastMsg.includes('led') || lastMsg.includes('refletor') || lastMsg.includes('spot')) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Ótimo. Para os pontos de iluminação, além das luminárias/refletores LED, vai precisar de sensores de presença, relés fotocélula, fita isolante e soquetes ou conectores rápidos? Deseja branco frio (6500K) ou branco quente (3000K)?'
+        });
+      }
+
+      if (lastMsg.includes('tomada') || lastMsg.includes('interruptor')) {
+        return res.status(200).json({
+          status: 'success',
+          provider: 'guardrail-fallback',
+          text: 'Perfeito. Para as tomadas e interruptores, vai precisar de conjuntos modulares 10A e 20A (para micro-ondas e chuveiro), além das caixas de embutir 4x2 e 4x4 amarelas reforçadas. Quantas unidades de cada?'
+        });
+      }
+
+      return res.status(200).json({
+        status: 'success',
+        provider: 'guardrail-fallback',
+        text: 'Excelente. Anotei sua solicitação. Para complementar a sua instalação com segurança, recomendo adicionarmos fita isolante 3M e conectores adequados. Mais algum item de infraestrutura ou cabeamento que deseja incluir na lista antes de enviarmos ao balcão?'
+      });
+
+    } catch (err: any) {
+      console.error('Erro na rota /api/chat-assistant:', err);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Erro interno ao processar conversa com o assistente.',
+        detail: err.message
+      });
+    }
+  });
+
+  // Rota POST: Integração e Proxy com AWS Lambda para captação de leads (Resolve problemas de CORS no navegador)
+  app.post('/api/lambda-lead', async (req, res) => {
+    try {
+      const { nome, email, token } = req.body;
+      const cleanNome = String(nome || '').trim();
+      const cleanEmail = String(email || '').trim();
+      const cleanToken = String(token || '').trim();
+
+      if (!cleanNome || !cleanEmail) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Os campos nome e email são obrigatórios.'
+        });
+      }
+
+      const AWS_LAMBDA_URL = 'https://rl4eobl3ypivmz3vzx6npkj6e40ldowj.lambda-url.us-east-2.on.aws/';
+      const lambdaResponse = await fetch(AWS_LAMBDA_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          nome: cleanNome,
+          email: cleanEmail,
+          token: cleanToken
+        })
+      });
+
+      const lambdaText = await lambdaResponse.text();
+      let lambdaData: any = {};
+      try {
+        lambdaData = JSON.parse(lambdaText);
+      } catch (_) {
+        lambdaData = { raw: lambdaText };
+      }
+
+      if (!lambdaResponse.ok) {
+        // Se estiver em desenvolvimento e for token de teste ou bloqueio de bot/segurança na Lambda, permite simulação de sucesso
+        const isDev = process.env.NODE_ENV !== 'production';
+        if (isDev && (cleanToken.startsWith('DEV_') || cleanToken === '1x00000000000000000000AA' || lambdaText.includes('segurança') || lambdaText.includes('Bot') || lambdaText.includes('Falha de segurança'))) {
+          console.warn('[AWS Lambda Proxy] Modo desenvolvimento ativo: permitindo envio local sem bloqueio.');
+          return res.status(200).json({
+            status: 'success',
+            message: 'Lead enviado com sucesso (Ambiente de desenvolvimento local)',
+            data: { devBypass: true, original: lambdaData }
+          });
+        }
+
+        console.warn(`[AWS Lambda Proxy] Resposta com status ${lambdaResponse.status}:`, lambdaText);
+        return res.status(lambdaResponse.status).json({
+          status: 'error',
+          message: 'Erro retornado pela AWS Lambda',
+          detail: lambdaData
+        });
+      }
+
+      console.log(`✓ [AWS Lambda Proxy] Lead enviado com sucesso para ${cleanEmail}:`, lambdaData);
+      return res.status(200).json({
+        status: 'success',
+        message: 'Lead enviado com sucesso para AWS Lambda',
+        data: lambdaData
+      });
+    } catch (err: any) {
+      console.error('Erro no proxy AWS Lambda:', err);
+      return res.status(500).json({
+        status: 'error',
+        message: 'Falha na conexão com a AWS Lambda.',
         detail: err.message
       });
     }
@@ -1041,6 +1649,45 @@ async function startServer() {
       console.error('Erro ao salvar avaliação:', err);
       return res.status(500).json({ status: 'error', message: err.message });
     }
+  });
+
+  // Rota estática dedicada para og-image.png (WhatsApp, Facebook, Twitter, LinkedIn)
+  const ogImagePath = path.join(__dirname, 'public', 'og-image.png');
+  app.get('/og-image.png', (req, res) => {
+    if (fs.existsSync(ogImagePath)) {
+      res.setHeader('Content-Type', 'image/png');
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+      return res.sendFile(ogImagePath);
+    }
+    return res.status(404).send('Imagem de pré-visualização não encontrada');
+  });
+
+  // Serve arquivos da pasta /public
+  app.use(express.static(path.join(__dirname, 'public')));
+
+  // Interceptor para crawlers de redes sociais e WhatsApp garantindo URL absoluta dinâmica do host atual
+  app.use((req, res, next) => {
+    const ua = req.headers['user-agent'] || '';
+    const isSocialCrawler = /facebookexternalhit|whatsapp|twitterbot|telegrambot|linkedinbot|slackbot/i.test(ua);
+
+    if (isSocialCrawler && req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.includes('.')) {
+      const host = req.headers['x-forwarded-host'] || req.headers.host || 'ais-pre-wa2mpj73zi5aps6isfyt7k-491567258625.us-west1.run.app';
+      const proto = req.headers['x-forwarded-proto'] || 'https';
+      const currentOrigin = `${proto}://${host}`;
+
+      const indexPath = process.env.NODE_ENV === 'production' 
+        ? path.join(__dirname, 'dist', 'index.html') 
+        : path.join(__dirname, 'index.html');
+
+      if (fs.existsSync(indexPath)) {
+        let html = fs.readFileSync(indexPath, 'utf-8');
+        html = html.replace(/https:\/\/ais-pre-[^"']+\/og-image\.png/g, `${currentOrigin}/og-image.png`);
+        html = html.replace(/https:\/\/ais-pre-[^"']+\//g, `${currentOrigin}/`);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(html);
+      }
+    }
+    next();
   });
 
   // Modo de Desenvolvimento com Vite Middleware

@@ -1,5 +1,6 @@
 import React from 'react';
 import { ArrowRight, Zap, CheckCircle2, MessageSquare, MapPin, Phone } from 'lucide-react';
+import { motion } from 'motion/react';
 import { ReviewsData } from '../types';
 
 interface HeroProps {
@@ -13,8 +14,13 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote }) => {
     <section className="bg-[#f4f6f9] py-6 sm:py-8 border-b border-slate-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         
-        {/* Banner Principal Comercial em Largura Total (Sem coluna lateral de categorias) */}
-        <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-5 sm:p-8 relative overflow-hidden">
+        {/* Banner Principal Comercial em Largura Total */}
+        <motion.div 
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, ease: 'easeOut' }}
+          className="bg-white rounded-lg border border-slate-200 shadow-sm p-5 sm:p-8 relative overflow-hidden"
+        >
           
           {/* Faixa decorativa superior com as cores da Phoenix (Azul e Vermelho) */}
           <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-[#003882] via-[#004b9c] to-[#d31010]" />
@@ -60,11 +66,11 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote }) => {
                 </div>
               </div>
 
-              {/* Botões de Ação */}
+              {/* Botões de Ação com Efeito de Escala e Microinteração */}
               <div className="pt-2 sm:pt-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3">
                 <button
                   onClick={onScrollToQuote}
-                  className="inline-flex items-center justify-center gap-2 bg-[#004b9c] hover:bg-[#003882] text-white font-bold text-xs sm:text-sm px-6 py-3 rounded-md shadow-sm transition-all cursor-pointer"
+                  className="inline-flex items-center justify-center gap-2 bg-[#004b9c] hover:bg-[#003882] text-white font-bold text-xs sm:text-sm px-6 py-3 rounded-md shadow-sm transition-all duration-200 hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
                 >
                   <span>SOLICITAR ORÇAMENTO</span>
                   <ArrowRight className="w-4 h-4" />
@@ -74,7 +80,7 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote }) => {
                   href="https://wa.me/5511983239782?text=Ol%C3%A1!%20Gostaria%20de%20um%20or%C3%A7amento%20de%20materiais%20el%C3%A9tricos%20com%20a%20Phoenix%20El%C3%A9trica."
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#20ba5a] text-white font-bold text-xs sm:text-sm px-5 py-3 rounded-md shadow-sm transition-all"
+                  className="inline-flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#20ba5a] text-white font-bold text-xs sm:text-sm px-5 py-3 rounded-md shadow-sm transition-all duration-200 hover:scale-[1.02] active:scale-[0.98]"
                 >
                   <MessageSquare className="w-4 h-4 fill-current" />
                   <span>Chamar no WhatsApp</span>
@@ -84,8 +90,8 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote }) => {
             </div>
 
             {/* Destaque Visual Comercial Direto (Box com Loja Física e Contato Comercial) */}
-            <div className="xl:col-span-4 bg-[#f8fafc] border border-blue-100 rounded-lg p-5 sm:p-6 text-center space-y-3 flex flex-col justify-between">
-              <div className="w-12 h-12 rounded-full bg-blue-100 text-[#003882] flex items-center justify-center mx-auto">
+            <div className="xl:col-span-4 bg-[#f8fafc] border border-blue-100 rounded-lg p-5 sm:p-6 text-center space-y-3 flex flex-col justify-between hover:shadow-md hover:border-blue-200 transition-all duration-300">
+              <div className="w-12 h-12 rounded-full bg-blue-100 text-[#003882] flex items-center justify-center mx-auto transition-transform duration-300 group-hover:scale-110">
                 <Zap className="w-6 h-6 text-[#003882] fill-current" />
               </div>
 
@@ -141,7 +147,7 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote }) => {
 
           </div>
 
-        </div>
+        </motion.div>
 
       </div>
     </section>
