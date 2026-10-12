@@ -183,6 +183,12 @@ export default function App() {
         {/* Categorias: Fios e Cabos, Iluminação, Disjuntores e Quadros, etc. */}
         <Categories onSelectCategory={handleSelectCategory} />
 
+        {/* Formulário de Captação de Orçamentos + WhatsApp */}
+        <QuoteForm
+          initialMaterial={selectedMaterial}
+          onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+        />
+
         {/* Diferenciais Competitivos: Por que Comprar na Phoenix Elétrica */}
         <Features />
 
@@ -190,12 +196,6 @@ export default function App() {
         <GoogleReviews 
           reviewsData={reviewsData}
           onReviewAdded={refreshReviews}
-        />
-
-        {/* Formulário de Captação de Orçamentos + WhatsApp */}
-        <QuoteForm
-          initialMaterial={selectedMaterial}
-          onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
         />
       </main>
 
