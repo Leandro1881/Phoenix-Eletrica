@@ -125,6 +125,10 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote, reviewsData }) => {
             <motion.img
               src={slide.image}
               alt=""
+              width={1600}
+              height={1067}
+              fetchPriority={index === 0 ? 'high' : 'auto'}
+              decoding="async"
               initial={{ scale: 1.12 }}
               animate={{ scale: 1 }}
               transition={{ duration: SLIDE_DURATION_MS / 1000 + 1.5, ease: 'linear' }}
@@ -141,6 +145,9 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote, reviewsData }) => {
 
         <div className="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-16 pb-28 sm:pb-32">
           <div className="max-w-2xl">
+            <h1 className="mb-5 text-xs sm:text-sm font-bold uppercase tracking-[0.2em] text-brand-yellow">
+              Distribuidora de materiais elétricos em São Paulo
+            </h1>
             <AnimatePresence mode="wait">
               <motion.div
                 key={index}
@@ -153,12 +160,12 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote, reviewsData }) => {
                   exit: { opacity: 0, y: -12, transition: { duration: 0.3 } }
                 }}
               >
-                <motion.h1
+                <motion.p
                   variants={{ hidden: { opacity: 0, y: 24 }, show: { opacity: 1, y: 0, transition: { duration: 0.6, ease: [0.22, 1, 0.36, 1] } } }}
                   className="text-4xl sm:text-5xl lg:text-6xl font-extrabold text-white tracking-tight leading-[1.05]"
                 >
                   {slide.title}
-                </motion.h1>
+                </motion.p>
                 <motion.p
                   variants={{ hidden: { opacity: 0, y: 16 }, show: { opacity: 1, y: 0 } }}
                   className="mt-5 text-base sm:text-lg text-blue-100/85 max-w-lg"

@@ -195,7 +195,10 @@ const CategoryCard: React.FC<{
             key={imageIndex}
             src={cat.images[imageIndex].url}
             alt={`${cat.title} - ${cat.images[imageIndex].label}`}
+            width={800}
+            height={600}
             loading="lazy"
+            decoding="async"
             onError={(e) => {
               if (e.currentTarget.src !== FALLBACK_IMAGE) e.currentTarget.src = FALLBACK_IMAGE;
             }}

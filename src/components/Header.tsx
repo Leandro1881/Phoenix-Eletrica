@@ -118,7 +118,7 @@ export const Header: React.FC<HeaderProps> = ({ onSearch, onSelectCategory }) =>
         }`}
       >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 sm:h-[72px] flex items-center justify-between gap-4">
-          <a href="#" className="shrink-0 transition-transform duration-200 hover:scale-[1.02]" title="Phoenix Elétrica">
+          <a href="/" className="shrink-0 transition-transform duration-200 hover:scale-[1.02]" aria-label="Phoenix Elétrica, página inicial">
             <PhoenixLogo variant="horizontal" size="md" />
           </a>
 

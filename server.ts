@@ -1770,31 +1770,6 @@ async function startServer() {
   // Serve arquivos da pasta /public
   app.use(express.static(path.join(__dirname, 'public')));
 
-  // Interceptor para crawlers de redes sociais e WhatsApp garantindo URL absoluta dinâmica do host atual
-  app.use((req, res, next) => {
-    const ua = req.headers['user-agent'] || '';
-    const isSocialCrawler = /facebookexternalhit|whatsapp|twitterbot|telegrambot|linkedinbot|slackbot/i.test(ua);
-
-    if (isSocialCrawler && req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.includes('.')) {
-      const host = req.headers['x-forwarded-host'] || req.headers.host || 'ais-pre-wa2mpj73zi5aps6isfyt7k-491567258625.us-west1.run.app';
-      const proto = req.headers['x-forwarded-proto'] || 'https';
-      const currentOrigin = `${proto}://${host}`;
-
-      const indexPath = process.env.NODE_ENV === 'production' 
-        ? path.join(__dirname, 'dist', 'index.html') 
-        : path.join(__dirname, 'index.html');
-
-      if (fs.existsSync(indexPath)) {
-        let html = fs.readFileSync(indexPath, 'utf-8');
-        html = html.replace(/https:\/\/ais-pre-[^"']+\/og-image\.png/g, `${currentOrigin}/og-image.png`);
-        html = html.replace(/https:\/\/ais-pre-[^"']+\//g, `${currentOrigin}/`);
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        return res.send(html);
-      }
-    }
-    next();
-  });
-
   // Modo de Desenvolvimento com Vite Middleware
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');

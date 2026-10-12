@@ -48,7 +48,7 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
           </div>
 
           <div className="md:col-span-3">
-            <h4 className="text-xs font-bold uppercase tracking-[0.2em] text-white mb-4">Produtos</h4>
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-white mb-4">Produtos</h2>
             <ul className="space-y-2.5">
               {navCategories.map((item) => (
                 <li key={item.targetId}>
@@ -61,7 +61,7 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
           </div>
 
           <div className="md:col-span-5">
-            <h4 className="text-xs font-bold uppercase tracking-[0.2em] text-white mb-4">Atendimento</h4>
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-white mb-4">Atendimento</h2>
             <ul className="space-y-3">
               <li>
                 <a href="tel:1133527777" className="flex items-center gap-3 hover:text-white transition-colors">

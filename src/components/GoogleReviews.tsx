@@ -139,7 +139,11 @@ export const GoogleReviews: React.FC<GoogleReviewsProps> = ({ reviewsData }) => 
                       {review.foto ? (
                         <img
                           src={review.foto}
-                          alt=""
+                          alt={`Foto de ${review.autor}`}
+                          width={44}
+                          height={44}
+                          loading="lazy"
+                          decoding="async"
                           referrerPolicy="no-referrer"
                           className="w-11 h-11 rounded-full object-cover ring-2 ring-white/20"
                         />
@@ -150,7 +154,7 @@ export const GoogleReviews: React.FC<GoogleReviewsProps> = ({ reviewsData }) => 
                       )}
                       <div>
                         {review.link ? (
-                          <a href={review.link} target="_blank" rel="noopener noreferrer" className="font-bold hover:underline">
+                          <a href={review.link} target="_blank" rel="nofollow ugc noopener noreferrer" className="font-bold hover:underline">
                             {review.autor}
                           </a>
                         ) : (
