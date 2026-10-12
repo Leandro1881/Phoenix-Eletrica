@@ -1,0 +1,16 @@
+# Arquivos que NÃO são enviados no `gcloud run deploy --source .`
+.git
+.gitignore
+node_modules/
+dist/
+uploads/
+backend/
+standalone-frontend/
+
+# Segredos e dados locais
+.env
+.env.*
+!.env.example
+gcp-key*.json
+phoenix_eletrica.db
+*.log

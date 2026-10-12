@@ -48,12 +48,16 @@ export interface GoogleReview {
   comentario: string;
   verificado: boolean;
   data_criacao?: string;
+  foto?: string;
+  link?: string;
 }
 
 export interface ReviewsData {
   total: number;
   ratingAverage: number;
   reviews: GoogleReview[];
+  source?: 'google' | 'local';
+  googleUrl?: string;
 }
 
 export interface MonthlyExecutiveMetric {

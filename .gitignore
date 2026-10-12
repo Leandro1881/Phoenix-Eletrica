@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Credenciais do Google Cloud (nunca versionar)
+gcp-key*.json
+
+# Dados locais (banco SQLite e anexos enviados em dev)
+phoenix_eletrica.db
+uploads/

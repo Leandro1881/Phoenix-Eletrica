@@ -5,6 +5,7 @@ import {
   ShieldCheck, Lock, LogOut, Key, Trash2, Download, Search, CheckCircle2, AlertCircle,
   BarChart3, Maximize2, Paperclip
 } from 'lucide-react';
+import { adminFetch, ADMIN_LOGOUT_EVENT, clearAdminSession, getAdminToken, getAdminUser, loginAdmin } from '../utils/adminAuth';
 import { Lead, VisitasStats, ExecutiveDashboardData } from '../types';
 import { ExecutiveDashboard } from './ExecutiveDashboard';
 
@@ -15,13 +16,9 @@ interface LeadsModalProps {
 }
 
 export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenFullScreen }) => {
-  // Estado de Autenticação Administrativa via localStorage
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    return localStorage.getItem('phoenix_admin_auth') === 'true';
-  });
-  const [adminUser, setAdminUser] = useState<string>(() => {
-    return localStorage.getItem('phoenix_admin_user') || 'admin';
-  });
+  // Sessão validada pelo servidor (token em sessionStorage)
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!getAdminToken());
+  const [adminUser, setAdminUser] = useState<string>(() => getAdminUser() || 'admin');
   const [loginUser, setLoginUser] = useState<string>('admin');
   const [loginPass, setLoginPass] = useState<string>('');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -43,13 +40,11 @@ export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenF
   const [error, setError] = useState<string | null>(null);
   const [searchLead, setSearchLead] = useState('');
 
-  // Verifica se já estava logado no localStorage
+  // Verifica se já havia sessão válida ao abrir
   useEffect(() => {
-    const authSaved = localStorage.getItem('phoenix_admin_auth');
-    const userSaved = localStorage.getItem('phoenix_admin_user');
-    if (authSaved === 'true') {
+    if (getAdminToken()) {
       setIsAuthenticated(true);
-      if (userSaved) setAdminUser(userSaved);
+      setAdminUser(getAdminUser() || 'admin');
     }
   }, [isOpen]);
 
@@ -59,21 +54,21 @@ export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenF
     setError(null);
     try {
       // 1. Carrega Métricas Executivas
-      const resDash = await fetch('/api/admin/dashboard');
+      const resDash = await adminFetch('/api/admin/dashboard');
       if (resDash.ok) {
         const dData = await resDash.json();
         setDashboardData(dData);
       }
 
       // 2. Carrega Leads
-      const resLeads = await fetch('/api/orcamentos');
+      const resLeads = await adminFetch('/api/orcamentos');
       if (resLeads.ok) {
         const data = await resLeads.json();
         setLeads(data.leads || []);
       }
 
       // 3. Carrega Estatísticas de Visitas/Acessos
-      const resVisitas = await fetch('/api/visitas');
+      const resVisitas = await adminFetch('/api/visitas');
       if (resVisitas.ok) {
         const dataVisitas = await resVisitas.json();
         setVisitasStats(dataVisitas);
@@ -105,59 +100,31 @@ export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenF
     }
 
     setIsLoggingIn(true);
-    try {
-      const envPass = (import.meta as any).env?.VITE_ADMIN_PASSWORD || 'phoenix@2024';
-      const envUser = (import.meta as any).env?.VITE_ADMIN_USER || 'admin';
-      const storedPass = localStorage.getItem('phoenix_admin_password') || envPass;
-      const storedUser = localStorage.getItem('phoenix_admin_user') || envUser;
-
-      let backendSuccess = false;
-      let returnedUser = inputUser;
-      try {
-        const res = await fetch('/api/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ usuario: inputUser, senha: inputPass })
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          backendSuccess = true;
-          if (data.usuario) returnedUser = data.usuario;
-          if (data.token) {
-            localStorage.setItem('phoenix_admin_token', data.token);
-          }
-        }
-      } catch (_) {}
-
-      const isLocalValid = (inputPass === storedPass) &&
-        (inputUser.toLowerCase() === storedUser.toLowerCase() || inputUser.toLowerCase() === 'admin');
-
-      if (backendSuccess || isLocalValid) {
-        setIsAuthenticated(true);
-        setAdminUser(returnedUser);
-        localStorage.setItem('phoenix_admin_auth', 'true');
-        localStorage.setItem('phoenix_admin_user', returnedUser);
-        localStorage.setItem('phoenix_admin_password', inputPass);
-        setLoginPass('');
-      } else {
-        setLoginError('Credenciais inválidas.');
-      }
-    } catch (err: any) {
-      setLoginError('Falha ao conectar com o servidor de autenticação.');
-    } finally {
-      setIsLoggingIn(false);
+    const result = await loginAdmin(inputUser, inputPass);
+    setIsLoggingIn(false);
+    if ('error' in result) {
+      setLoginError(result.error);
+      return;
     }
+    setIsAuthenticated(true);
+    setAdminUser(result.usuario);
+    setLoginPass('');
   };
 
   // Handler de Logout
   const handleLogout = () => {
-    localStorage.removeItem('phoenix_admin_auth');
-    localStorage.removeItem('phoenix_admin_user');
-    localStorage.removeItem('phoenix_admin_token');
+    clearAdminSession();
     setIsAuthenticated(false);
     setLoginPass('');
     setLoginError(null);
   };
+
+  // Sessão expirada em qualquer requisição: volta para a tela de login
+  useEffect(() => {
+    const onLogout = () => setIsAuthenticated(false);
+    window.addEventListener(ADMIN_LOGOUT_EVENT, onLogout);
+    return () => window.removeEventListener(ADMIN_LOGOUT_EVENT, onLogout);
+  }, []);
 
   // Handler de Troca de Senha
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -174,21 +141,17 @@ export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenF
       return;
     }
 
-    if (novaSenha.length < 6) {
-      setPassFeedback({ type: 'error', message: 'A nova senha deve ter no mínimo 6 dígitos.' });
+    if (novaSenha.length < 10) {
+      setPassFeedback({ type: 'error', message: 'A nova senha deve ter no mínimo 10 caracteres.' });
       return;
     }
 
     setIsChangingPass(true);
     try {
-      const res = await fetch('/api/admin/change-password', {
+      const res = await adminFetch('/api/admin/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          usuario: adminUser,
-          senhaAtual,
-          novaSenha
-        })
+        body: JSON.stringify({ senhaAtual, novaSenha })
       });
 
       const data = await res.json();
@@ -212,7 +175,7 @@ export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenF
     if (!window.confirm(`Deseja realmente excluir o lead #${id}?`)) return;
 
     try {
-      const res = await fetch(`/api/orcamentos/${id}`, { method: 'DELETE' });
+      const res = await adminFetch(`/api/orcamentos/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setLeads((prev) => prev.filter((l) => l.id !== id));
       }
@@ -314,11 +277,6 @@ export const LeadsModal: React.FC<LeadsModalProps> = ({ isOpen, onClose, onOpenF
                   required
                   className="w-full bg-slate-50 focus:bg-white border border-slate-300 focus:border-[#004b9c] focus:ring-2 focus:ring-blue-100 rounded-md px-3.5 py-2.5 text-xs sm:text-sm text-slate-900 outline-none transition-all"
                 />
-              </div>
-
-              <div className="bg-slate-50 border border-slate-200 rounded p-2.5 text-[11px] text-slate-500">
-                <span className="font-semibold text-slate-700 block mb-0.5">Credenciais padrão iniciais:</span>
-                Usuário: <code className="font-mono text-[#003882] font-bold">admin</code> · Senha: <code className="font-mono text-[#003882] font-bold">phoenix@2024</code>
               </div>
 
               <div className="pt-2 flex items-center gap-3">

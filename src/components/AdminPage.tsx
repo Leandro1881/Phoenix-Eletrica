@@ -5,27 +5,21 @@ import {
   Download, Search, CheckCircle2, AlertCircle, ArrowLeft, BarChart3,
   Home, Paperclip
 } from 'lucide-react';
+import { adminFetch, ADMIN_LOGOUT_EVENT, clearAdminSession, getAdminToken, getAdminUser, loginAdmin } from '../utils/adminAuth';
 import { Lead, VisitasStats, ExecutiveDashboardData } from '../types';
 import { AdminDashboard } from './AdminDashboard';
 import { LeadsModal } from './LeadsModal';
 import { PhoenixLogo } from './PhoenixLogo';
 
-// Variáveis de ambiente ou credenciais padrão do sistema
-const ENV_ADMIN_PASSWORD = (import.meta as any).env?.VITE_ADMIN_PASSWORD || 'phoenix@2024';
-const ENV_ADMIN_USER = (import.meta as any).env?.VITE_ADMIN_USER || 'admin';
 
 interface AdminPageProps {
   onNavigateHome: () => void;
 }
 
 export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
-  // Autenticação via localStorage / variável de ambiente
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    return localStorage.getItem('phoenix_admin_auth') === 'true';
-  });
-  const [adminUser, setAdminUser] = useState<string>(() => {
-    return localStorage.getItem('phoenix_admin_user') || ENV_ADMIN_USER;
-  });
+  // Sessão validada pelo servidor (token em sessionStorage)
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!getAdminToken());
+  const [adminUser, setAdminUser] = useState<string>(() => getAdminUser() || 'admin');
   const [isLeadsModalOpen, setIsLeadsModalOpen] = useState<boolean>(false);
 
   // Formulário de Login
@@ -57,21 +51,21 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     setError(null);
     try {
       // 1. Dashboard Executivo Consolidado
-      const resDash = await fetch('/api/admin/dashboard');
+      const resDash = await adminFetch('/api/admin/dashboard');
       if (resDash.ok) {
         const dData = await resDash.json();
         setDashboardData(dData);
       }
 
       // 2. Orçamentos Recebidos
-      const resLeads = await fetch('/api/orcamentos');
+      const resLeads = await adminFetch('/api/orcamentos');
       if (resLeads.ok) {
         const lData = await resLeads.json();
         setLeads(lData.leads || []);
       }
 
       // 3. Acessos ao Site
-      const resVisitas = await fetch('/api/visitas');
+      const resVisitas = await adminFetch('/api/visitas');
       if (resVisitas.ok) {
         const vData = await resVisitas.json();
         setVisitasStats(vData);
@@ -89,7 +83,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     }
   }, [isAuthenticated]);
 
-  // Handler de Login com validação no backend, localStorage ou variável de ambiente
+  // Login validado no servidor
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
@@ -103,64 +97,31 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     }
 
     setIsLoggingIn(true);
-
-    try {
-      // 1. Obtém senha armazenada no localStorage ou na variável de ambiente
-      const storedPassword = localStorage.getItem('phoenix_admin_password') || ENV_ADMIN_PASSWORD;
-      const storedUser = localStorage.getItem('phoenix_admin_user') || ENV_ADMIN_USER;
-
-      // 2. Valida contra o backend se disponível
-      let backendSuccess = false;
-      let returnedUser = inputUser;
-      try {
-        const res = await fetch('/api/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ usuario: inputUser, senha: inputPass })
-        });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          backendSuccess = true;
-          if (data.usuario) returnedUser = data.usuario;
-          if (data.token) {
-            localStorage.setItem('phoenix_admin_token', data.token);
-          }
-        }
-      } catch (err) {
-        console.warn('Backend indisponível, validando contra localStorage/env:', err);
-      }
-
-      // 3. Validação com o valor no localStorage ou na variável de ambiente
-      const isLocalAuthValid = 
-        (inputPass === storedPassword) &&
-        (inputUser.toLowerCase() === storedUser.toLowerCase() || inputUser.toLowerCase() === 'admin');
-
-      if (backendSuccess || isLocalAuthValid) {
-        setIsAuthenticated(true);
-        setAdminUser(returnedUser);
-        localStorage.setItem('phoenix_admin_auth', 'true');
-        localStorage.setItem('phoenix_admin_user', returnedUser);
-        localStorage.setItem('phoenix_admin_password', inputPass);
-        setLoginPass('');
-      } else {
-        setLoginError('Senha ou usuário inválidos. Verifique suas credenciais de administrador.');
-      }
-    } catch (err: any) {
-      setLoginError('Falha ao validar autenticação.');
-    } finally {
-      setIsLoggingIn(false);
+    const result = await loginAdmin(inputUser, inputPass);
+    setIsLoggingIn(false);
+    if ('error' in result) {
+      setLoginError(result.error);
+      return;
     }
+    setIsAuthenticated(true);
+    setAdminUser(result.usuario);
+    setLoginPass('');
   };
 
   // Handler de Logout
   const handleLogout = () => {
-    localStorage.removeItem('phoenix_admin_auth');
-    localStorage.removeItem('phoenix_admin_user');
-    localStorage.removeItem('phoenix_admin_token');
+    clearAdminSession();
     setIsAuthenticated(false);
     setLoginPass('');
     setLoginError(null);
   };
+
+  // Sessão expirada em qualquer requisição: volta para a tela de login
+  useEffect(() => {
+    const onLogout = () => setIsAuthenticated(false);
+    window.addEventListener(ADMIN_LOGOUT_EVENT, onLogout);
+    return () => window.removeEventListener(ADMIN_LOGOUT_EVENT, onLogout);
+  }, []);
 
   // Handler de Troca de Senha
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -177,24 +138,17 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
       return;
     }
 
-    if (novaSenha.length < 6) {
-      setPassFeedback({ type: 'error', message: 'A nova senha deve ter no mínimo 6 caracteres.' });
+    if (novaSenha.length < 10) {
+      setPassFeedback({ type: 'error', message: 'A nova senha deve ter no mínimo 10 caracteres.' });
       return;
     }
 
     setIsChangingPass(true);
     try {
-      // Atualiza no localStorage
-      localStorage.setItem('phoenix_admin_password', novaSenha);
-
-      const res = await fetch('/api/admin/change-password', {
+      const res = await adminFetch('/api/admin/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          usuario: adminUser,
-          senhaAtual,
-          novaSenha
-        })
+        body: JSON.stringify({ senhaAtual, novaSenha })
       });
 
       const data = await res.json();
@@ -207,11 +161,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
         setPassFeedback({ type: 'error', message: data.message || 'Falha ao alterar senha no servidor.' });
       }
     } catch (err: any) {
-      // Mesmo com erro de rede no backend, localStorage foi atualizado
-      setPassFeedback({ type: 'success', message: 'Senha atualizada localmente com sucesso!' });
-      setSenhaAtual('');
-      setNovaSenha('');
-      setNovaSenhaConfirm('');
+      setPassFeedback({ type: 'error', message: 'Erro ao conectar ao servidor. A senha não foi alterada.' });
     } finally {
       setIsChangingPass(false);
     }
@@ -222,7 +172,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     if (!window.confirm(`Deseja realmente excluir o lead #${id}?`)) return;
 
     try {
-      const res = await fetch(`/api/orcamentos/${id}`, { method: 'DELETE' });
+      const res = await adminFetch(`/api/orcamentos/${id}`, { method: 'DELETE' });
       if (res.ok) {
         setLeads((prev) => prev.filter((l) => l.id !== id));
         fetchAllData();
@@ -336,11 +286,6 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
                     required
                     className="w-full bg-slate-50 focus:bg-white border border-slate-300 focus:border-[#004b9c] focus:ring-2 focus:ring-blue-100 rounded-lg px-3.5 py-2.5 text-xs sm:text-sm text-slate-900 outline-none transition-all"
                   />
-                </div>
-
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 text-[11px] text-slate-500">
-                  <span className="font-semibold text-slate-700 block mb-0.5">Credenciais padrão iniciais do sistema:</span>
-                  Usuário: <code className="font-mono text-[#003882] font-bold">admin</code> · Senha: <code className="font-mono text-[#003882] font-bold">phoenix@2024</code>
                 </div>
 
                 <button

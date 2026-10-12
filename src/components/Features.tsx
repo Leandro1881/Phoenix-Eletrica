@@ -1,92 +1,58 @@
 import React from 'react';
-import { Truck, CheckCircle2, ShieldCheck, BadgePercent, Headphones, Building2 } from 'lucide-react';
+import { Truck, PackageCheck, ShieldCheck, BadgePercent, Headphones, Building2 } from 'lucide-react';
 import { motion } from 'motion/react';
 
 const FEATURES_DATA = [
-  {
-    icon: Truck,
-    title: 'Logística Própria e Pontual',
-    description: 'Frota dedicada para entregar no canteiro da sua obra, indústria ou empresa com agilidade e conferência rigorosa de cada item.'
-  },
-  {
-    icon: BadgePercent,
-    title: 'Preço Direto de Distribuidora',
-    description: 'Volume e negociação direto com as principais indústrias nacionais. Descontos progressivos na compra de rolos e lotes completos.'
-  },
-  {
-    icon: Building2,
-    title: 'Faturamento no Boleto para CNPJ',
-    description: 'Condições comerciais para construtoras, engenharias e instaladores. Prazos especiais e emissão ágil de Nota Fiscal.'
-  },
-  {
-    icon: ShieldCheck,
-    title: '100% Normatizado (Inmetro & NBR)',
-    description: 'Segurança absoluta contra condutores desbitolados. Todos os cabos e disjuntores possuem certificação compulsória e laudos técnicos.'
-  },
-  {
-    icon: Headphones,
-    title: 'Consultoria Técnica com Especialistas',
-    description: 'Envie sua lista de materiais ou projeto elétrico. Nossa equipe analisa e indica os modelos compatíveis com o melhor custo-benefício.'
-  },
-  {
-    icon: CheckCircle2,
-    title: 'Estoque Amplo a Pronta Entrega',
-    description: 'Mais de 15.000 itens disponíveis: cabos flexíveis, quadros, eletrodutos, barramentos, automação e iluminação LED de alta eficiência.'
-  }
+  { icon: Truck, title: 'Entrega na obra', description: 'Frota própria e conferência item a item.' },
+  { icon: BadgePercent, title: 'Preço de distribuidora', description: 'Desconto progressivo em rolos e lotes.' },
+  { icon: Building2, title: 'Boleto para CNPJ', description: 'Prazos especiais e NF na hora.' },
+  { icon: ShieldCheck, title: 'Inmetro e NBR', description: 'Cabos e disjuntores certificados.' },
+  { icon: Headphones, title: 'Apoio técnico', description: 'Ajudamos a dimensionar seu projeto.' },
+  { icon: PackageCheck, title: 'Estoque amplo', description: 'Mais de 15 mil itens a pronta entrega.' }
 ];
 
 export const Features: React.FC = () => {
   return (
-    <section id="diferenciais" className="py-12 sm:py-16 bg-[#f4f6f9] border-b border-slate-200">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        
-        {/* Header da Seção com Efeito Scroll Reveal */}
-        <motion.div 
+    <section id="diferenciais" className="relative py-20 sm:py-24 bg-brand-navy text-white overflow-hidden scroll-mt-20">
+      <div className="absolute inset-0 bg-grid opacity-50" />
+      <div className="absolute left-1/2 -translate-x-1/2 -top-40 w-[700px] h-[400px] rounded-full bg-brand-blue/40 blur-[140px]" />
+
+      <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true, margin: "-40px" }}
+          viewport={{ once: true, margin: '-40px' }}
           transition={{ duration: 0.5 }}
-          className="text-center max-w-3xl mx-auto mb-12 space-y-2"
+          className="text-center max-w-xl mx-auto mb-14"
         >
-          <span className="text-xs font-bold uppercase tracking-wider text-[#d31010]">
-            Tradição & Confiabilidade
-          </span>
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-[#003882] tracking-tight">
-            Por que Comprar na Phoenix Elétrica?
+          <span className="text-xs font-bold uppercase tracking-[0.2em] text-brand-yellow">Por que a Phoenix</span>
+          <h2 className="mt-2 text-3xl sm:text-4xl font-extrabold tracking-tight">
+            Estrutura para sua obra não parar
           </h2>
-          <p className="text-slate-600 text-xs sm:text-sm">
-            Estrutura sólida para fornecer materiais elétricos de primeira linha sem atrasos na sua obra.
-          </p>
         </motion.div>
 
-        {/* Grade de Diferenciais com Efeito Cascata (Staggered Fade-in-up) e Flutuação no Hover */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
           {FEATURES_DATA.map((item, idx) => {
             const Icon = item.icon;
-
             return (
               <motion.div
-                key={idx}
+                key={item.title}
                 initial={{ opacity: 0, y: 28 }}
                 whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, margin: "-30px" }}
-                transition={{ duration: 0.45, delay: idx * 0.08 }}
-                className="p-6 rounded-lg bg-white border border-slate-200 shadow-xs hover:border-[#004b9c] hover:shadow-xl hover:-translate-y-1.5 transition-all duration-300 space-y-2.5 group cursor-default"
+                viewport={{ once: true, margin: '-30px' }}
+                transition={{ duration: 0.5, delay: idx * 0.07 }}
+                className="group relative rounded-2xl sm:rounded-3xl bg-white/[0.04] ring-1 ring-white/10 p-5 sm:p-7 overflow-hidden transition-all duration-500 hover:bg-white/[0.08] hover:ring-brand-yellow/40 hover:-translate-y-1"
               >
-                <div className="w-10 h-10 rounded bg-blue-50 text-[#004b9c] group-hover:bg-[#003882] group-hover:text-white flex items-center justify-center transition-colors duration-300">
-                  <Icon className="w-5 h-5" />
+                <div className="absolute -right-10 -bottom-10 w-32 h-32 rounded-full bg-brand-yellow/0 group-hover:bg-brand-yellow/10 blur-2xl transition-colors duration-500" />
+                <div className="relative w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-brand-yellow/10 text-brand-yellow flex items-center justify-center ring-1 ring-brand-yellow/20 transition-all duration-500 group-hover:bg-brand-yellow group-hover:text-brand-navy group-hover:rotate-[-6deg]">
+                  <Icon className="w-5 h-5 sm:w-6 sm:h-6" />
                 </div>
-                <h3 className="text-base font-bold text-slate-900 group-hover:text-[#004b9c] transition-colors">
-                  {item.title}
-                </h3>
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  {item.description}
-                </p>
+                <h3 className="relative mt-4 sm:mt-5 text-sm sm:text-lg font-bold">{item.title}</h3>
+                <p className="relative mt-1 text-xs sm:text-sm text-blue-100/65">{item.description}</p>
               </motion.div>
             );
           })}
         </div>
-
       </div>
     </section>
   );

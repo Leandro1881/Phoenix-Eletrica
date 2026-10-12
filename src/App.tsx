@@ -14,7 +14,8 @@ import { LeadsModal } from './components/LeadsModal';
 import { AdminPage } from './components/AdminPage';
 import { GoogleReviews } from './components/GoogleReviews';
 import { AiQuoteAssistant } from './components/AiQuoteAssistant';
-import { MessageSquare, Bot, Sparkles } from 'lucide-react';
+import { MessageSquare, Bot } from 'lucide-react';
+import { MotionConfig } from 'motion/react';
 import { ReviewsData } from './types';
 import { trackWhatsAppClick } from './utils/analytics';
 
@@ -22,7 +23,6 @@ export default function App() {
   const [selectedMaterial, setSelectedMaterial] = useState<string>('');
   const [isLeadsModalOpen, setIsLeadsModalOpen] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
-  const [, setLeadsCount] = useState<number>(0);
   const [reviewsData, setReviewsData] = useState<ReviewsData>({
     total: 16,
     ratingAverage: 4.8,
@@ -52,21 +52,7 @@ export default function App() {
     }
   };
 
-  // Consulta quantidade de leads salvos no banco SQLite
-  const refreshLeadsCount = async () => {
-    try {
-      const res = await fetch('/api/orcamentos');
-      if (res.ok) {
-        const data = await res.json();
-        setLeadsCount(data.total || data.leads?.length || 0);
-      }
-    } catch (e) {
-      console.warn('Erro ao consultar contagem de leads:', e);
-    }
-  };
-
   useEffect(() => {
-    refreshLeadsCount();
     refreshReviews();
 
     // Registra a visita no banco de dados SQLite silenciosamente
@@ -175,7 +161,8 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#f4f6f9] text-slate-800 flex flex-col font-['Plus_Jakarta_Sans',sans-serif] selection:bg-[#004b9c] selection:text-white w-full max-w-full overflow-x-hidden">
+    <MotionConfig reducedMotion="user">
+    <div className="min-h-screen bg-surface text-slate-800 flex flex-col font-sans antialiased selection:bg-brand-blue selection:text-white w-full max-w-full overflow-x-clip">
       
       {/* Header com Logo Phoenix Elétrica e Botão WhatsApp Oficial */}
       <Header 
@@ -196,21 +183,20 @@ export default function App() {
         {/* Categorias: Fios e Cabos, Iluminação, Disjuntores e Quadros, etc. */}
         <Categories onSelectCategory={handleSelectCategory} />
 
-        {/* Formulário de Captação de Orçamentos + WhatsApp */}
-        <QuoteForm
-          initialMaterial={selectedMaterial}
-          onLeadSubmitted={refreshLeadsCount}
-          onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
-        />
+        {/* Diferenciais Competitivos: Por que Comprar na Phoenix Elétrica */}
+        <Features />
 
-        {/* Avaliações Positivas no Google (Contagem e Média Dinâmica) */}
+        {/* Avaliações reais do Google */}
         <GoogleReviews 
           reviewsData={reviewsData}
           onReviewAdded={refreshReviews}
         />
 
-        {/* Diferenciais Competitivos: Por que Comprar na Phoenix Elétrica */}
-        <Features />
+        {/* Formulário de Captação de Orçamentos + WhatsApp */}
+        <QuoteForm
+          initialMaterial={selectedMaterial}
+          onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+        />
       </main>
 
       {/* Footer limpo sem botões para clientes; gatilho secreto via 3 cliques no copyright */}
@@ -243,13 +229,13 @@ export default function App() {
         <button
           type="button"
           onClick={() => setIsAiAssistantOpen((prev) => !prev)}
-          className="inline-flex items-center gap-2.5 bg-[#003882] hover:bg-[#002f6c] text-white p-3.5 sm:px-5 sm:py-3.5 rounded-full sm:rounded-2xl shadow-2xl shadow-blue-950/60 hover:shadow-blue-900/40 transition-all hover:scale-105 active:scale-95 cursor-pointer border border-blue-400/30 group"
+          className="inline-flex items-center gap-2.5 bg-brand-navy hover:bg-brand-navy-2 text-white p-3.5 sm:px-5 sm:py-3.5 rounded-full shadow-2xl shadow-brand-navy/40 transition-all hover:-translate-y-0.5 active:scale-95 cursor-pointer ring-1 ring-white/15 group"
           title="Assistente Técnico de IA da Phoenix Elétrica"
           aria-label="Abrir Assistente de IA"
         >
           <div className="relative flex items-center justify-center">
-            <Bot className="w-5 h-5 text-yellow-300 group-hover:rotate-12 transition-transform" />
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-[#003882] animate-pulse" />
+            <Bot className="w-5 h-5 text-brand-yellow group-hover:rotate-12 transition-transform" />
+            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-brand-navy animate-pulse" />
           </div>
           <span className="hidden sm:inline font-bold text-sm">Assistente de IA</span>
         </button>
@@ -259,23 +245,22 @@ export default function App() {
       <div className="fixed bottom-6 right-6 z-30 pointer-events-none">
         <div className="relative pointer-events-auto flex items-center justify-center">
           {/* Ondas sutis se expandindo atrás do botão (efeito radar / pulse) */}
-          <span className="absolute -inset-1.5 rounded-full sm:rounded-2xl bg-emerald-500/40 animate-ping pointer-events-none" style={{ animationDuration: '2.5s' }} />
-          <span className="absolute -inset-3 rounded-full sm:rounded-2xl bg-emerald-400/20 animate-pulse pointer-events-none" />
 
           <a
             href="https://wa.me/5511983239782?text=Ol%C3%A1!%20Gostaria%20de%20um%20or%C3%A7amento%20com%20a%20Phoenix%20El%C3%A9trica."
             target="_blank"
             rel="noopener noreferrer"
             onClick={() => trackWhatsAppClick('Botão Flutuante (WhatsApp)', 'WhatsApp da Loja')}
-            className="relative inline-flex items-center gap-2.5 bg-[#25D366] hover:bg-[#20ba5a] text-white p-3.5 sm:px-5 sm:py-3.5 rounded-full sm:rounded-2xl shadow-2xl shadow-emerald-950/60 hover:shadow-emerald-600/50 transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer animate-whatsapp-pulse"
+            className="relative inline-flex items-center gap-2.5 bg-[#25D366] hover:bg-[#1fb257] text-white p-3.5 sm:px-5 sm:py-3.5 rounded-full shadow-2xl shadow-emerald-700/40 transition-all duration-300 hover:-translate-y-0.5 active:scale-95 cursor-pointer animate-whatsapp-pulse"
             title="Chamar no WhatsApp da Phoenix Elétrica"
           >
             <MessageSquare className="w-5 h-5 fill-current" />
-            <span className="hidden sm:inline font-bold text-sm">WhatsApp da Loja</span>
+            <span className="hidden sm:inline font-bold text-sm">WhatsApp</span>
           </a>
         </div>
       </div>
 
     </div>
+    </MotionConfig>
   );
 }

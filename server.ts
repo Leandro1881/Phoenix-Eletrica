@@ -4,15 +4,243 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import initSqlJs, { Database } from 'sql.js';
-import { GoogleGenAI } from '@google/genai';
+import crypto from 'crypto';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { Storage } from '@google-cloud/storage';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
-const DB_PATH = path.join(process.cwd(), 'phoenix_eletrica.db');
+const PORT = Number(process.env.PORT || 3000);
+// Em produção (Cloud Run) aponta para um bucket privado montado como disco, para os dados sobreviverem a reinícios
+const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), 'phoenix_eletrica.db');
 
 let db: Database | null = null;
+
+// =========================================================================
+// Limites do assistente de IA (controle de custo e abuso)
+// =========================================================================
+const CHAT_MAX_HISTORY = 20;
+const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash'];
+const GEMINI_TIMEOUT_MS = 12000;
+const CHAT_MAX_CHARS_PER_MESSAGE = 2000;
+const CHAT_MAX_OUTPUT_TOKENS = 1024;
+const CHAT_IP_WINDOW_MS = 10 * 60 * 1000;
+const CHAT_IP_MAX_REQUESTS = Number(process.env.CHAT_IP_MAX_REQUESTS || 20);
+const CHAT_DAILY_MAX_REQUESTS = Number(process.env.CHAT_DAILY_MAX_REQUESTS || 1000);
+
+const chatRequestsByIp = new Map<string, number[]>();
+let chatDailyCount = { day: new Date().toISOString().slice(0, 10), total: 0 };
+
+// Retorna a mensagem de bloqueio, ou null se a requisição pode seguir
+function checkChatRateLimit(ip: string): string | null {
+  const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
+  if (chatDailyCount.day !== today) {
+    chatDailyCount = { day: today, total: 0 };
+    chatRequestsByIp.clear();
+  }
+
+  if (chatDailyCount.total >= CHAT_DAILY_MAX_REQUESTS) {
+    return 'O assistente atingiu o limite diário de atendimentos. Envie sua lista pelo formulário ou WhatsApp.';
+  }
+
+  const recent = (chatRequestsByIp.get(ip) || []).filter((t) => now - t < CHAT_IP_WINDOW_MS);
+  if (recent.length >= CHAT_IP_MAX_REQUESTS) {
+    chatRequestsByIp.set(ip, recent);
+    return 'Muitas mensagens em pouco tempo. Aguarde alguns minutos e tente novamente.';
+  }
+
+  recent.push(now);
+  chatRequestsByIp.set(ip, recent);
+  chatDailyCount.total += 1;
+  return null;
+}
+
+// =========================================================================
+// Upload de anexos (Google Cloud Storage quando GCS_BUCKET está definido)
+// =========================================================================
+const UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
+const UPLOAD_CONTENT_TYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.csv': 'text/csv',
+  '.txt': 'text/plain',
+  '.rtf': 'application/rtf',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp'
+};
+
+let storageClient: Storage | null = null;
+function getStorage(): Storage {
+  // Credenciais: GOOGLE_APPLICATION_CREDENTIALS (arquivo JSON) em dev; conta de serviço automática no Cloud Run
+  if (!storageClient) storageClient = new Storage();
+  return storageClient;
+}
+
+// =========================================================================
+// Autenticação do painel administrativo (validada no servidor)
+// =========================================================================
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+// Com ADMIN_SESSION_SECRET definido, o login vale entre reinícios/instâncias; sem ele, cada reinício pede login de novo
+const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
+const loginFailuresByIp = new Map<string, number[]>();
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return ['scrypt', salt, hash].join('$');
+}
+
+function verifyPassword(password: string, stored: string): boolean {
+  if (stored.startsWith('scrypt$')) {
+    const [, salt, hash] = stored.split('$');
+    const candidate = crypto.scryptSync(password, salt, 64);
+    const expected = Buffer.from(hash, 'hex');
+    return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+  }
+  // Senha antiga em texto puro (migrada para hash no próximo login bem-sucedido)
+  const a = Buffer.from(password);
+  const b = Buffer.from(stored);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function signAdminToken(usuario: string): string {
+  const payload = Buffer.from(JSON.stringify({ u: usuario, exp: Date.now() + ADMIN_SESSION_TTL_MS })).toString('base64url');
+  const sig = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('base64url');
+  return payload + '.' + sig;
+}
+
+function verifyAdminToken(token: string): { u: string } | null {
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expected = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('base64url');
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    return data.exp > Date.now() ? { u: data.u } : null;
+  } catch {
+    return null;
+  }
+}
+
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const session = token ? verifyAdminToken(token) : null;
+  if (!session) {
+    return res.status(401).json({ success: false, message: 'Sessão expirada. Faça login novamente.' });
+  }
+  (req as any).adminUser = session.u;
+  next();
+}
+
+function tooManyLoginFailures(ip: string): boolean {
+  const now = Date.now();
+  const recent = (loginFailuresByIp.get(ip) || []).filter((t) => now - t < LOGIN_WINDOW_MS);
+  loginFailuresByIp.set(ip, recent);
+  return recent.length >= LOGIN_MAX_FAILURES;
+}
+
+function registerLoginFailure(ip: string) {
+  const list = loginFailuresByIp.get(ip) || [];
+  list.push(Date.now());
+  loginFailuresByIp.set(ip, list);
+}
+
+// Token fixo devolvido pelas chaves de teste do Cloudflare Turnstile
+const TURNSTILE_TEST_TOKEN = 'XXXX.DUMMY.TOKEN.XXXX';
+
+// =========================================================================
+// Avaliações reais do Google (Places API - New)
+// Requer GOOGLE_PLACES_API_KEY no .env. GOOGLE_PLACE_ID é opcional: se ausente,
+// o ID é descoberto uma vez via Text Search pelo nome + endereço da loja.
+// =========================================================================
+const GOOGLE_REVIEWS_URL =
+  'https://www.google.com/search?q=phoenix+eletrica#lrd=0x94ce586e18db2857:0x44a861fb89d1d1f5,1,,,,';
+const GOOGLE_PLACE_QUERY = 'Phoenix Elétrica, R. Anhaia, 740 - Bom Retiro, São Paulo - SP';
+const GOOGLE_REVIEWS_CACHE_MS = 6 * 60 * 60 * 1000;
+
+let googleReviewsCache: { data: any; expiresAt: number } | null = null;
+let resolvedPlaceId: string | null = process.env.GOOGLE_PLACE_ID || null;
+
+async function fetchGooglePlaceReviews(): Promise<any | null> {
+  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+  if (!apiKey) return null;
+
+  if (googleReviewsCache && googleReviewsCache.expiresAt > Date.now()) {
+    return googleReviewsCache.data;
+  }
+
+  try {
+    if (!resolvedPlaceId) {
+      const searchRes = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'places.id'
+        },
+        body: JSON.stringify({ textQuery: GOOGLE_PLACE_QUERY, languageCode: 'pt-BR' })
+      });
+      const searchJson: any = await searchRes.json();
+      resolvedPlaceId = searchJson?.places?.[0]?.id || null;
+      if (!resolvedPlaceId) {
+        console.warn('[Google Places] Loja não encontrada via Text Search:', searchJson?.error?.message || '');
+        return googleReviewsCache?.data || null;
+      }
+    }
+
+    const detailsRes = await fetch(
+      `https://places.googleapis.com/v1/places/${resolvedPlaceId}?languageCode=pt-BR`,
+      {
+        headers: {
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'rating,userRatingCount,reviews,googleMapsUri'
+        }
+      }
+    );
+    const place: any = await detailsRes.json();
+    if (!detailsRes.ok) {
+      console.warn('[Google Places] Falha ao consultar avaliações:', place?.error?.message || detailsRes.status);
+      return googleReviewsCache?.data || null;
+    }
+
+    const reviews = (place.reviews || []).map((r: any, idx: number) => ({
+      id: idx + 1,
+      autor: r.authorAttribution?.displayName || 'Cliente Google',
+      cargo: 'Avaliação no Google',
+      nota: r.rating || 5,
+      data_texto: r.relativePublishTimeDescription || '',
+      comentario: r.text?.text || r.originalText?.text || '',
+      verificado: true,
+      foto: r.authorAttribution?.photoUri || undefined,
+      link: r.authorAttribution?.uri || undefined
+    })).filter((r: any) => r.comentario);
+
+    const data = {
+      total: Number(place.userRatingCount || 0),
+      ratingAverage: Number(place.rating || 0),
+      reviews,
+      source: 'google',
+      googleUrl: GOOGLE_REVIEWS_URL
+    };
+
+    googleReviewsCache = { data, expiresAt: Date.now() + GOOGLE_REVIEWS_CACHE_MS };
+    return data;
+  } catch (err) {
+    console.warn('[Google Places] Erro de rede ao buscar avaliações:', err);
+    return googleReviewsCache?.data || null;
+  }
+}
 
 // Normaliza especificações técnicas e corrige typos de teclado mobile (ex: 15.mm2 -> 1,5mm²)
 function normalizeSpec(text: string): string {
@@ -203,236 +431,25 @@ async function setupDatabase() {
       )
     `);
 
-    // Inicializa credenciais padrão caso não exista
+    // Cria o login do painel a partir de ADMIN_USER / ADMIN_PASSWORD (nunca senha fixa no código)
     const adminCheck = db.exec(`SELECT COUNT(*) as total FROM admin_auth`);
     const totalAdmin = adminCheck[0]?.values[0]?.[0] || 0;
     if (totalAdmin === 0) {
-      db.run(
-        `INSERT INTO admin_auth (usuario, senha) VALUES (?, ?)`,
-        ['admin', 'phoenix@2024']
-      );
-    }
-
-    // Inicializa cliques de WhatsApp simulados para histórico executivo se estiver vazio
-    const clickCheck = db.exec(`SELECT COUNT(*) as total FROM cliques_whatsapp`);
-    const totalClicks = clickCheck[0]?.values[0]?.[0] || 0;
-    if (totalClicks === 0) {
-      const sampleClicks = [
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-09-26 14:15:00' },
-        { origem: 'Formulário de Cotação', rotulo: 'Abrir WhatsApp Pós-Envio', data: '2026-09-26 11:32:00' },
-        { origem: 'Cabeçalho / Topo', rotulo: 'Televendas WhatsApp', data: '2026-09-26 09:20:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-09-25 16:40:00' },
-        { origem: 'Catálogo de Produtos', rotulo: 'Fios e Cabos', data: '2026-09-25 10:11:00' },
-        { origem: 'Rodapé da Loja', rotulo: 'WhatsApp Comercial', data: '2026-09-24 15:05:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-09-23 17:10:00' },
-        { origem: 'Formulário de Cotação', rotulo: 'Abrir WhatsApp Pós-Envio', data: '2026-09-22 13:45:00' },
-        { origem: 'Catálogo de Produtos', rotulo: 'Disjuntores & Quadros', data: '2026-09-21 08:50:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-09-20 14:22:00' },
-        { origem: 'Cabeçalho / Topo', rotulo: 'Televendas WhatsApp', data: '2026-09-18 16:15:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-09-15 11:02:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-08-28 14:10:00' },
-        { origem: 'Formulário de Cotação', rotulo: 'Abrir WhatsApp Pós-Envio', data: '2026-08-25 10:30:00' },
-        { origem: 'Cabeçalho / Topo', rotulo: 'Televendas WhatsApp', data: '2026-08-20 16:00:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-08-15 09:40:00' },
-        { origem: 'Catálogo de Produtos', rotulo: 'Iluminação LED', data: '2026-08-10 11:20:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-08-04 15:50:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-07-25 10:10:00' },
-        { origem: 'Formulário de Cotação', rotulo: 'Abrir WhatsApp Pós-Envio', data: '2026-07-18 14:20:00' },
-        { origem: 'Cabeçalho / Topo', rotulo: 'Televendas WhatsApp', data: '2026-07-12 16:45:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-07-05 11:15:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-06-20 15:30:00' },
-        { origem: 'Formulário de Cotação', rotulo: 'Abrir WhatsApp Pós-Envio', data: '2026-06-14 10:00:00' },
-        { origem: 'Botão Flutuante (WhatsApp)', rotulo: 'WhatsApp Principal', data: '2026-06-08 17:15:00' }
-      ];
-
-      for (const clk of sampleClicks) {
-        db.run(
-          `INSERT INTO cliques_whatsapp (origem_botao, rotulo, data_hora) VALUES (?, ?, ?)`,
-          [clk.origem, clk.rotulo, clk.data]
-        );
+      const adminUser = process.env.ADMIN_USER || 'admin';
+      const adminPassword = process.env.ADMIN_PASSWORD;
+      if (adminPassword && adminPassword.length >= 10) {
+        db.run(`INSERT INTO admin_auth (usuario, senha) VALUES (?, ?)`, [adminUser, hashPassword(adminPassword)]);
+      } else {
+        console.warn('⚠ [ADMIN] Defina ADMIN_PASSWORD (mín. 10 caracteres) para habilitar o login do painel.');
       }
     }
 
-    // Inicializa orçamentos distribuídos caso banco seja novo
-    const leadCheck = db.exec(`SELECT COUNT(*) as total FROM clientes_orcamento`);
-    const totalLeads = Number(leadCheck[0]?.values[0]?.[0] || 0);
-    if (totalLeads < 4) {
-      const sampleLeads = [
-        {
-          nome: 'Engenheiro Marcos Vinicius',
-          telefone: '(11) 98765-4321',
-          cidade: 'São Paulo - SP',
-          materiais: '6 rolos de Cabo Flexível 2.5mm² antichama (azul e preto), 4 rolos de Cabo 4mm² e 20 disjuntores DIN bipolar 20A Steck.',
-          data: '2026-09-26 10:45:00'
-        },
-        {
-          nome: 'Construtora Alvorada Ltda (Carlos)',
-          telefone: '(11) 99123-8877',
-          cidade: 'Guarulhos - SP',
-          materiais: '100m Eletroduto Corrugado 25mm Tigre, 15 Caixas 4x2 PVC reforçadas, 30 Tomadas 2P+T 10A e 10 Tomadas 20A.',
-          data: '2026-09-25 15:20:00'
-        },
-        {
-          nome: 'Julio Cesar Instalador',
-          telefone: '(11) 97654-1122',
-          cidade: 'São Paulo - SP',
-          materiais: '8 Refletores LED 100W IP66 Branco Frio, 12 Luminárias Painel LED de Embutir 24W 6500K e 50m fita isolante 3M.',
-          data: '2026-09-24 09:15:00'
-        },
-        {
-          nome: 'Eletrotécnica Moura & Cia',
-          telefone: '(11) 98221-5544',
-          cidade: 'Campinas - SP',
-          materiais: '4 Contatores Tripolares 25A 220V, 2 Relés Térmicos de Sobrecarga 16-24A, 1 Inversor de Frequência 5CV e botoeiras de comando.',
-          data: '2026-09-21 16:40:00'
-        },
-        {
-          nome: 'Mariana Duarte (Reforma Residencial)',
-          telefone: '(11) 99344-7711',
-          cidade: 'São Bernardo do Campo - SP',
-          materiais: '2 Quadros de Distribuição 24 DIN com barramento neutro/terra, 1 Disjuntor Geral 63A e 8 Disjuntores 16A Curva C.',
-          data: '2026-09-17 11:30:00'
-        },
-        {
-          nome: 'Indústria Têxtil Bom Retiro',
-          telefone: '(11) 98112-9900',
-          cidade: 'São Paulo - SP',
-          materiais: '300m Cabo Flexível 10mm² 750V Prysmian, barramentos de cobre e chaves seccionadoras sob carga 100A.',
-          data: '2026-08-28 14:15:00'
-        },
-        {
-          nome: 'Condomínio Solar das Palmeiras',
-          telefone: '(11) 97433-2288',
-          cidade: 'Osasco - SP',
-          materiais: '15 Refletores LED 200W para quadra, sensores de presença fotocélula e 150m Cabo PP 3x2.5mm².',
-          data: '2026-08-16 10:00:00'
-        },
-        {
-          nome: 'Fábio Eletricista Predial',
-          telefone: '(11) 99554-3322',
-          cidade: 'Santo André - SP',
-          materiais: 'Fios 1.5mm² e 2.5mm², 40 interruptores e tomadas modulares brancas, disjuntores termomagnéticos DIN.',
-          data: '2026-07-22 13:40:00'
-        },
-        {
-          nome: 'Galpão Logístico Express',
-          telefone: '(11) 98991-6677',
-          cidade: 'São Paulo - SP',
-          materiais: 'Eletrocalhas perfuradas 100x50mm galvanizadas a fogo, perfilados, curvas 90° e pendurais com tirantes.',
-          data: '2026-06-19 16:10:00'
-        }
-      ];
+    // Sem dados de exemplo: pedidos, visitas e cliques vêm apenas do uso real do site
 
-      for (const lead of sampleLeads) {
-        db.run(
-          `INSERT INTO clientes_orcamento (nome, telefone, cidade, materiais, data_solicitacao) VALUES (?, ?, ?, ?, ?)`,
-          [lead.nome, lead.telefone, lead.cidade, lead.materiais, lead.data]
-        );
-      }
-    }
-
-    // Inicializa visitas distribuídas para histórico executivo condizente com as interações
-    const visitCheck = db.exec(`SELECT COUNT(*) as total FROM visitas_site`);
-    const totalVisits = Number(visitCheck[0]?.values[0]?.[0] || 0);
-    if (totalVisits < 40) {
-      // Garante uma base realista de visitas para os períodos
-      const sampleVisits = [
-        // Setembro / 2026 (Mês atual com boa tração)
-        { data: '2026-09-26 17:30:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-26 16:30:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-26 15:10:00', disp: 'Desktop / Computador', nav: 'Edge', orig: 'Google Maps' },
-        { data: '2026-09-26 14:05:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Acesso Direto' },
-        { data: '2026-09-26 12:45:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Acesso Direto' },
-        { data: '2026-09-26 10:20:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-26 09:10:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-25 18:00:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Instagram / Redes' },
-        { data: '2026-09-25 16:30:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Google Maps' },
-        { data: '2026-09-25 14:15:00', disp: 'Desktop / Computador', nav: 'Firefox', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-25 11:20:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Acesso Direto' },
-        { data: '2026-09-24 16:40:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-24 11:30:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'WhatsApp Compartilhado' },
-        { data: '2026-09-24 09:15:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-23 15:40:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-        { data: '2026-09-23 09:50:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-22 17:40:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-        { data: '2026-09-22 14:10:00', disp: 'Desktop / Computador', nav: 'Edge', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-21 15:30:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-21 13:20:00', disp: 'Desktop / Computador', nav: 'Edge', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-20 16:20:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Acesso Direto' },
-        { data: '2026-09-19 11:15:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-18 15:45:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-        { data: '2026-09-17 10:20:00', disp: 'Desktop / Computador', nav: 'Firefox', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-15 14:30:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-12 11:00:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-09-08 16:10:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-
-        // Agosto / 2026
-        { data: '2026-08-28 15:30:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-08-25 14:00:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-08-22 11:15:00', disp: 'Desktop / Computador', nav: 'Edge', orig: 'Google Maps' },
-        { data: '2026-08-20 10:30:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Acesso Direto' },
-        { data: '2026-08-18 17:00:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-08-15 16:45:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Google Maps' },
-        { data: '2026-08-12 14:20:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-08-10 10:10:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Acesso Direto' },
-        { data: '2026-08-05 16:40:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-
-        // Julho / 2026
-        { data: '2026-07-28 11:10:00', disp: 'Desktop / Computador', nav: 'Firefox', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-07-25 15:30:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-        { data: '2026-07-20 14:10:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-07-15 15:25:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-        { data: '2026-07-12 10:45:00', disp: 'Desktop / Computador', nav: 'Edge', orig: 'Acesso Direto' },
-        { data: '2026-07-08 16:20:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Google Busca (Orgânica)' },
-
-        // Junho / 2026
-        { data: '2026-06-25 15:40:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-06-22 10:40:00', disp: 'Desktop / Computador', nav: 'Chrome', orig: 'Google Busca (Orgânica)' },
-        { data: '2026-06-18 16:50:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Maps' },
-        { data: '2026-06-14 11:20:00', disp: 'Desktop / Computador', nav: 'Edge', orig: 'Acesso Direto' },
-        { data: '2026-06-10 14:15:00', disp: 'Mobile / Celular', nav: 'Safari', orig: 'Acesso Direto' },
-        { data: '2026-06-05 09:30:00', disp: 'Mobile / Celular', nav: 'Chrome', orig: 'Google Busca (Orgânica)' }
-      ];
-      for (const v of sampleVisits) {
-        db.run(
-          `INSERT INTO visitas_site (data_hora, dispositivo, navegador, origem, pagina) VALUES (?, ?, ?, ?, '/')`,
-          [v.data, v.disp, v.nav, v.orig]
-        );
-      }
-    }
-
-    // Garante as 3 melhores avaliações verídicas 5 estrelas do Google
-    db.run(`DELETE FROM avaliacoes_google`);
-    const initialReviews = [
-      {
-        autor: 'Carlos Alberto',
-        cargo: 'Local Guide no Google',
-        nota: 5,
-        data_texto: 'Há 3 semanas',
-        comentario: 'Excelente atendimento, variedade grande de materiais elétricos e preço justo. Sempre compro para as reformas.'
-      },
-      {
-        autor: 'Roberto Santos',
-        cargo: 'Avaliação Verificada no Google',
-        nota: 5,
-        data_texto: 'Há 1 mês',
-        comentario: 'Ótima distribuidora no Bom Retiro. Pessoal atencioso, estoque a pronta entrega e facilidade no faturamento.'
-      },
-      {
-        autor: 'Eduardo Lima',
-        cargo: 'Avaliação Verificada no Google',
-        nota: 5,
-        data_texto: 'Há 2 semanas',
-        comentario: 'Atendimento nota 10, encontrei todos os cabos e disjuntores que precisava com preço de atacado.'
-      }
-    ];
-
-    for (const rev of initialReviews) {
-      db.run(
-        `INSERT INTO avaliacoes_google (autor, cargo, nota, data_texto, comentario, verificado) VALUES (?, ?, ?, ?, ?, 1)`,
-        [rev.autor, rev.cargo, rev.nota, rev.data_texto, rev.comentario]
-      );
-    }
+    // Remove avaliações de exemplo antigas (não eram avaliações reais do Google)
+    db.run(
+      `DELETE FROM avaliacoes_google WHERE autor IN ('Carlos Alberto', 'Roberto Santos', 'Eduardo Lima') AND data_texto LIKE 'Há %'`
+    );
 
     // Persiste no arquivo
     const data = db.export();
@@ -447,6 +464,8 @@ async function startServer() {
   await setupDatabase();
 
   const app = express();
+  // Atrás de 1 proxy (Cloud Run / load balancer): req.ip passa a ser o IP real do visitante
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -457,10 +476,14 @@ async function startServer() {
   }
   app.use('/uploads', express.static(UPLOADS_DIR, {
     setHeaders: (res, filePath) => {
-      // Garante visualização inline de PDFs nos navegadores
-      if (filePath.endsWith('.pdf')) {
-        res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      const ext = path.extname(filePath).toLowerCase();
+      if (ext === '.pdf' || ['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+        // PDFs e imagens abrem direto no navegador
         res.setHeader('Content-Disposition', 'inline');
+      } else {
+        // Demais formatos (e qualquer arquivo antigo fora da lista) só como download
+        res.setHeader('Content-Disposition', 'attachment');
       }
     }
   }));
@@ -476,7 +499,7 @@ async function startServer() {
   });
 
   // Rota POST: Upload de Arquivo de Orçamento (PDF, Word, etc.)
-  app.post('/api/upload', (req, res) => {
+  app.post('/api/upload', async (req, res) => {
     try {
       const { fileName, fileBase64, fileSize } = req.body;
 
@@ -487,25 +510,52 @@ async function startServer() {
         });
       }
 
-      const cleanExt = path.extname(fileName) || '.bin';
-      const rawBaseName = path.basename(fileName, cleanExt);
+      // Só aceita formatos de lista/orçamento (bloqueia .html, .svg, .js etc., que permitiriam XSS)
+      const cleanExt = path.extname(String(fileName)).toLowerCase();
+      const contentType = UPLOAD_CONTENT_TYPES[cleanExt];
+      if (!contentType) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Formato não permitido. Envie PDF, Word, Excel, CSV, TXT ou imagem (PNG, JPG, WEBP).'
+        });
+      }
+
+      const base64Data = String(fileBase64).replace(/^data:[^;]+;base64,/, '');
+      const buffer = Buffer.from(base64Data, 'base64');
+      if (buffer.length > UPLOAD_MAX_BYTES) {
+        return res.status(413).json({ status: 'error', message: 'Arquivo acima de 15MB.' });
+      }
+
+      const rawBaseName = path.basename(String(fileName), path.extname(String(fileName)));
       const safeBaseName = rawBaseName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
-      const safeFileName = `orcamento-${Date.now()}-${safeBaseName}${cleanExt}`;
-      const targetFilePath = path.join(UPLOADS_DIR, safeFileName);
+      // Sufixo aleatório: o link não pode ser adivinhado por quem não o recebeu
+      const safeFileName = `orcamento-${Date.now()}-${crypto.randomBytes(6).toString('hex')}-${safeBaseName}${cleanExt}`;
 
-      // Decodifica Base64 e salva no disco
-      const base64Data = fileBase64.replace(/^data:([A-Za-z-+/]+);base64,/, '');
-      fs.writeFileSync(targetFilePath, Buffer.from(base64Data, 'base64'));
+      let fileUrl: string;
+      const bucketName = process.env.GCS_BUCKET;
 
-      // Monta a URL pública absoluta
-      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
-      const forwardedHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || `localhost:${PORT}`;
-      const clientOrigin = req.body.clientOrigin ? String(req.body.clientOrigin).replace(/\/$/, '') : null;
-      const fileUrl = clientOrigin 
-        ? `${clientOrigin}/uploads/${safeFileName}` 
-        : `${proto}://${forwardedHost}/uploads/${safeFileName}`;
+      if (bucketName) {
+        // Produção e dev: Google Cloud Storage gera um link público permanente
+        const objectName = `orcamentos/${safeFileName}`;
+        await getStorage().bucket(bucketName).file(objectName).save(buffer, {
+          contentType,
+          resumable: false,
+          metadata: {
+            contentDisposition: cleanExt === '.pdf' || contentType.startsWith('image/') ? 'inline' : 'attachment',
+            cacheControl: 'public, max-age=31536000'
+          }
+        });
+        fileUrl = `https://storage.googleapis.com/${bucketName}/${objectName}`;
+      } else {
+        // Sem bucket configurado: disco local (link só funciona onde o servidor está acessível)
+        fs.writeFileSync(path.join(UPLOADS_DIR, safeFileName), buffer);
+        const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+        const forwardedHost = (req.headers['x-forwarded-host'] as string) || req.get('host') || `localhost:${PORT}`;
+        const baseUrl = (process.env.PUBLIC_BASE_URL || `${proto}://${forwardedHost}`).replace(/\/$/, '');
+        fileUrl = `${baseUrl}/uploads/${safeFileName}`;
+      }
 
-      console.log(`✓ [UPLOAD CONCLUÍDO] Arquivo salvo: ${safeFileName} (${fileSize || 'N/A'}) - URL Pública: ${fileUrl}`);
+      console.log(`✓ [UPLOAD CONCLUÍDO] ${safeFileName} (${fileSize || 'N/A'}) - URL: ${fileUrl}`);
 
       return res.status(200).json({
         status: 'success',
@@ -527,18 +577,29 @@ async function startServer() {
   // Rota POST: Assistente IA de Orçamento da Phoenix Elétrica (com Guardrails Estritos)
   app.post('/api/chat-assistant', async (req, res) => {
     try {
-      const { messages } = req.body;
-      if (!Array.isArray(messages) || messages.length === 0) {
+      const { messages: rawMessages } = req.body;
+      if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
         return res.status(400).json({
           status: 'error',
           message: 'Histórico de mensagens é obrigatório.'
         });
       }
 
+      const limitMessage = checkChatRateLimit(req.ip || 'desconhecido');
+      if (limitMessage) {
+        return res.status(429).json({ status: 'error', message: limitMessage });
+      }
+
+      // Limita tamanho do histórico e de cada mensagem para controlar o custo por chamada
+      const messages = rawMessages.slice(-CHAT_MAX_HISTORY).map((m: any) => ({
+        ...m,
+        text: String(m?.text || m?.content || '').slice(0, CHAT_MAX_CHARS_PER_MESSAGE)
+      }));
+
       const PHOENIX_SYSTEM_PROMPT = `És um assistente técnico de vendas da Phoenix Elétrica, em São Paulo. A tua ÚNICA função é ajudar o cliente a montar uma lista de materiais elétricos clara para orçamento. REGRAS ESTRITAS: 1. NUNCA forneça preços, descontos ou prazos. Responda que o balcão calculará isso. 2. Se o assunto não for material elétrico/obras, responda EXATAMENTE: 'Sou especialista apenas em materiais elétricos. Como posso ajudar com a sua lista?'. 3. Sugira itens complementares lógicos (ex: fita isolante para cabos), mas se o cliente dispensar ou disser que não precisa, NÃO inclua na lista. 4. Mantenha as respostas curtas e objetivas. 5. Quando o cliente finalizar a lista, retorne a lista estruturada contendo ESTRITAMENTE os materiais confirmados ou pedidos pelo cliente na conversa (sem adicionar itens que o cliente não pediu ou dispensou), com marcadores (•), e confirme que está pronta para envio ao balcão.`;
 
-      // 1. Prioridade para Gemini API se GEMINI_API_KEY ou VITE_GEMINI_API_KEY estiver configurado
-      const geminiApiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+      // 1. Prioridade para Gemini API (chave apenas no servidor, nunca com prefixo VITE_)
+      const geminiApiKey = process.env.GEMINI_API_KEY;
       if (geminiApiKey) {
         try {
           const ai = new GoogleGenAI({ apiKey: geminiApiKey });
@@ -552,29 +613,42 @@ async function startServer() {
             parts: [{ text: String(m.text || m.content || '') }]
           }));
 
-          const geminiResponse = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents,
-            config: {
-              systemInstruction: PHOENIX_SYSTEM_PROMPT,
-              temperature: 0.2,
-            }
-          });
+          // Tenta os modelos em ordem: se um estiver sobrecarregado (503) ou lento, passa ao próximo
+          for (const model of GEMINI_MODELS) {
+            try {
+              const geminiResponse = await ai.models.generateContent({
+                model,
+                contents,
+                config: {
+                  systemInstruction: PHOENIX_SYSTEM_PROMPT,
+                  temperature: 0.2,
+                  maxOutputTokens: CHAT_MAX_OUTPUT_TOKENS,
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                  httpOptions: { timeout: GEMINI_TIMEOUT_MS }
+                }
+              });
 
-          if (geminiResponse.text) {
-            return res.status(200).json({
-              status: 'success',
-              provider: 'gemini',
-              text: geminiResponse.text.trim()
-            });
+              if (geminiResponse.text) {
+                return res.status(200).json({
+                  status: 'success',
+                  provider: 'gemini',
+                  model,
+                  text: geminiResponse.text.trim()
+                });
+              }
+            } catch (modelError: any) {
+              console.warn(`[Gemini] ${model} falhou (${modelError?.status || 'timeout'}):`, String(modelError?.message || modelError).slice(0, 160));
+              // Chave inválida ou sem permissão: outros modelos também falhariam
+              if ([400, 401, 403].includes(modelError?.status)) break;
+            }
           }
         } catch (geminiError: any) {
           console.warn('Erro ao processar chamada Gemini no servidor:', geminiError?.message || geminiError);
         }
       }
 
-      // 2. Se houver OPENAI_API_KEY ou VITE_OPENAI_API_KEY configurado
-      const openAiApiKey = process.env.OPENAI_API_KEY || process.env.VITE_OPENAI_API_KEY;
+      // 2. Se houver OPENAI_API_KEY configurado (apenas no servidor)
+      const openAiApiKey = process.env.OPENAI_API_KEY;
       if (openAiApiKey) {
         try {
           const openAiMessages = [
@@ -595,6 +669,7 @@ async function startServer() {
               model: 'gpt-4o-mini',
               messages: openAiMessages,
               temperature: 0.2,
+              max_tokens: CHAT_MAX_OUTPUT_TOKENS,
             })
           });
 
@@ -968,6 +1043,30 @@ async function startServer() {
         });
       }
 
+      if (!cleanToken) {
+        return res.status(400).json({
+          status: 'error',
+          message: 'Verificação de segurança (Cloudflare Turnstile) ausente.'
+        });
+      }
+
+      // Chaves de teste do Turnstile (1x0000...AA) geram sempre este token fictício, que a Lambda
+      // (validada com a secret real) recusa. Aceito apenas fora de produção, para testes locais.
+      if (cleanToken === TURNSTILE_TEST_TOKEN) {
+        if (process.env.NODE_ENV === 'production') {
+          return res.status(403).json({
+            status: 'error',
+            message: 'Chave de teste do Turnstile não é aceita em produção.'
+          });
+        }
+        console.warn('[Turnstile] Token de teste aceito em desenvolvimento (Lambda não acionada).');
+        return res.status(200).json({
+          status: 'success',
+          message: 'Lead aceito em modo de teste do Turnstile (desenvolvimento)',
+          data: { testMode: true }
+        });
+      }
+
       const AWS_LAMBDA_URL = 'https://rl4eobl3ypivmz3vzx6npkj6e40ldowj.lambda-url.us-east-2.on.aws/';
       const lambdaResponse = await fetch(AWS_LAMBDA_URL, {
         method: 'POST',
@@ -990,17 +1089,6 @@ async function startServer() {
       }
 
       if (!lambdaResponse.ok) {
-        // Se estiver em desenvolvimento e for token de teste ou bloqueio de bot/segurança na Lambda, permite simulação de sucesso
-        const isDev = process.env.NODE_ENV !== 'production';
-        if (isDev && (cleanToken.startsWith('DEV_') || cleanToken === '1x00000000000000000000AA' || lambdaText.includes('segurança') || lambdaText.includes('Bot') || lambdaText.includes('Falha de segurança'))) {
-          console.warn('[AWS Lambda Proxy] Modo desenvolvimento ativo: permitindo envio local sem bloqueio.');
-          return res.status(200).json({
-            status: 'success',
-            message: 'Lead enviado com sucesso (Ambiente de desenvolvimento local)',
-            data: { devBypass: true, original: lambdaData }
-          });
-        }
-
         console.warn(`[AWS Lambda Proxy] Resposta com status ${lambdaResponse.status}:`, lambdaText);
         return res.status(lambdaResponse.status).json({
           status: 'error',
@@ -1121,7 +1209,7 @@ async function startServer() {
   });
 
   // Rota GET: Listar orçamentos recebidos (Painel Administrativo)
-  app.get('/api/orcamentos', (req, res) => {
+  app.get('/api/orcamentos', requireAdmin, (req, res) => {
     try {
       if (!db) {
         return res.json({ total: 0, leads: [] });
@@ -1169,8 +1257,13 @@ async function startServer() {
   // Rota POST: Login administrativo do lojista
   app.post('/api/admin/login', (req, res) => {
     try {
+      const ip = req.ip || 'desconhecido';
+      if (tooManyLoginFailures(ip)) {
+        return res.status(429).json({ success: false, message: 'Muitas tentativas. Aguarde 15 minutos.' });
+      }
+
       const { usuario, senha } = req.body;
-      if (!usuario || !senha) {
+      if (!usuario || !senha || typeof usuario !== 'string' || typeof senha !== 'string') {
         return res.status(400).json({ success: false, message: 'Informe usuário e senha.' });
       }
 
@@ -1183,20 +1276,23 @@ async function startServer() {
         [usuario.trim()]
       );
 
-      if (!check || check.length === 0 || check[0].values.length === 0) {
+      const found = check && check.length > 0 && check[0].values.length > 0;
+      const storedPassword = found ? String(check[0].values[0][2]) : '';
+      if (!found || !verifyPassword(senha, storedPassword)) {
+        registerLoginFailure(ip);
         return res.status(401).json({ success: false, message: 'Usuário ou senha incorretos.' });
       }
 
-      const storedPassword = check[0].values[0][2];
-      if (storedPassword !== senha) {
-        return res.status(401).json({ success: false, message: 'Usuário ou senha incorretos.' });
+      const usuarioDb = String(check[0].values[0][1]);
+      if (!storedPassword.startsWith('scrypt$')) {
+        db.run(`UPDATE admin_auth SET senha = ? WHERE id = ?`, [hashPassword(senha), check[0].values[0][0]]);
+        fs.writeFileSync(DB_PATH, Buffer.from(db.export()));
       }
 
-      const token = `adm_token_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       return res.json({
         success: true,
-        token,
-        usuario: check[0].values[0][1],
+        token: signAdminToken(usuarioDb),
+        usuario: usuarioDb,
         message: 'Autenticado com sucesso!'
       });
     } catch (err: any) {
@@ -1206,15 +1302,17 @@ async function startServer() {
   });
 
   // Rota POST: Alterar senha do admin
-  app.post('/api/admin/change-password', (req, res) => {
+  app.post('/api/admin/change-password', requireAdmin, (req, res) => {
     try {
-      const { usuario, senhaAtual, novaSenha } = req.body;
+      // Só pode trocar a senha do próprio usuário logado
+      const usuario = (req as any).adminUser as string;
+      const { senhaAtual, novaSenha } = req.body;
       if (!usuario || !senhaAtual || !novaSenha) {
         return res.status(400).json({ success: false, message: 'Todos os campos são obrigatórios.' });
       }
 
-      if (novaSenha.length < 6) {
-        return res.status(400).json({ success: false, message: 'A nova senha deve ter no mínimo 6 caracteres.' });
+      if (String(novaSenha).length < 10) {
+        return res.status(400).json({ success: false, message: 'A nova senha deve ter no mínimo 10 caracteres.' });
       }
 
       if (!db) {
@@ -1230,14 +1328,14 @@ async function startServer() {
         return res.status(401).json({ success: false, message: 'Usuário não encontrado.' });
       }
 
-      const storedPassword = check[0].values[0][1];
-      if (storedPassword !== senhaAtual) {
+      const storedPassword = String(check[0].values[0][1]);
+      if (!verifyPassword(String(senhaAtual), storedPassword)) {
         return res.status(401).json({ success: false, message: 'Senha atual incorreta.' });
       }
 
       db.run(
         `UPDATE admin_auth SET senha = ?, data_modificacao = CURRENT_TIMESTAMP WHERE LOWER(usuario) = LOWER(?)`,
-        [novaSenha, usuario.trim()]
+        [hashPassword(String(novaSenha)), usuario.trim()]
       );
 
       const data = db.export();
@@ -1251,7 +1349,7 @@ async function startServer() {
   });
 
   // Rota DELETE: Excluir lead pelo lojista
-  app.delete('/api/orcamentos/:id', (req, res) => {
+  app.delete('/api/orcamentos/:id', requireAdmin, (req, res) => {
     try {
       const id = req.params.id;
       if (!db) {
@@ -1294,7 +1392,7 @@ async function startServer() {
   });
 
   // Rota GET: Métricas Executivas e Dashboard Mensal Consolidado
-  app.get('/api/admin/dashboard', (req, res) => {
+  app.get('/api/admin/dashboard', requireAdmin, (req, res) => {
     try {
       if (!db) {
         return res.status(500).json({ error: 'Banco de dados não disponível' });
@@ -1504,7 +1602,7 @@ async function startServer() {
   });
 
   // Rota GET: Listar estatísticas e acessos do site (Painel do Lojista)
-  app.get('/api/visitas', (req, res) => {
+  app.get('/api/visitas', requireAdmin, (req, res) => {
     try {
       if (!db) {
         return res.json({ total: 0, hoje: 0, mobile: 0, desktop: 0, visitas: [] });
@@ -1555,9 +1653,14 @@ async function startServer() {
     }
   });
 
-  // Rota GET: Consultar avaliações dinâmicas do Google e médias verificadas (16 avaliações / média 4.8)
-  app.get('/api/avaliacoes', (req, res) => {
+  // Rota GET: Avaliações reais do Google (Places API) com fallback para as cadastradas no banco
+  app.get('/api/avaliacoes', async (req, res) => {
     try {
+      const googleData = await fetchGooglePlaceReviews();
+      if (googleData) {
+        return res.json(googleData);
+      }
+
       if (!db) {
         return res.json({ total: 16, ratingAverage: 4.8, reviews: [] });
       }
@@ -1594,7 +1697,9 @@ async function startServer() {
       return res.json({
         total: Number(total),
         ratingAverage,
-        reviews
+        reviews,
+        source: 'local',
+        googleUrl: GOOGLE_REVIEWS_URL
       });
     } catch (err: any) {
       console.error('Erro ao consultar avaliações do Google:', err);
@@ -1603,7 +1708,7 @@ async function startServer() {
   });
 
   // Rota POST: Adicionar nova avaliação (dinâmica, soma na contagem geral)
-  app.post('/api/avaliacoes', (req, res) => {
+  app.post('/api/avaliacoes', requireAdmin, (req, res) => {
     try {
       const { autor, cargo, nota, comentario } = req.body;
 

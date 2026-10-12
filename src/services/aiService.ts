@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 
 /**
  * System Prompt com Guardrails estritos para a Phoenix Elétrica
@@ -504,73 +503,10 @@ function generateFallbackResponse(userPrompt: string, history: ChatMessage[]): s
  * Envia histórico de mensagens para a IA com os Guardrails estritos
  */
 export async function sendChatMessage(messages: ChatMessage[]): Promise<string> {
-  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
   const lastUserMessage = messages[messages.length - 1]?.text || '';
 
-  // 1. Tenta API Gemini direta se configurada no frontend (VITE_GEMINI_API_KEY)
-  const viteGeminiKey = import.meta.env.VITE_GEMINI_API_KEY;
-  if (viteGeminiKey && viteGeminiKey.trim() !== '') {
-    try {
-      const ai = new GoogleGenAI({ apiKey: viteGeminiKey });
-      
-      const contents = messages.map((m) => ({
-        role: m.sender === 'user' ? 'user' : 'model',
-        parts: [{ text: m.text }]
-      }));
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents,
-        config: {
-          systemInstruction: PHOENIX_SYSTEM_PROMPT,
-          temperature: 0.2,
-        }
-      });
-
-      if (response.text) {
-        return response.text.trim();
-      }
-    } catch (err) {
-      console.warn('Falha na chamada Gemini direta pelo cliente, tentando servidor:', err);
-    }
-  }
-
-  // 2. Tenta API OpenAI direta se configurada no frontend (VITE_OPENAI_API_KEY)
-  const viteOpenAiKey = import.meta.env.VITE_OPENAI_API_KEY;
-  if (viteOpenAiKey && viteOpenAiKey.trim() !== '') {
-    try {
-      const openAiMessages = [
-        { role: 'system', content: PHOENIX_SYSTEM_PROMPT },
-        ...messages.map((m) => ({
-          role: m.sender === 'user' ? 'user' : 'assistant',
-          content: m.text
-        }))
-      ];
-
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${viteOpenAiKey}`
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: openAiMessages,
-          temperature: 0.2,
-        })
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const text = data.choices?.[0]?.message?.content;
-        if (text) return text.trim();
-      }
-    } catch (err) {
-      console.warn('Falha na chamada OpenAI direta pelo cliente, tentando servidor:', err);
-    }
-  }
-
-  // 3. Tenta a rota segura do servidor (/api/chat-assistant)
+  // Chaves de IA ficam só no servidor: o navegador nunca chama Gemini/OpenAI diretamente
+  // 1. Rota segura do servidor (/api/chat-assistant)
   try {
     const res = await fetch('/api/chat-assistant', {
       method: 'POST',
@@ -583,16 +519,18 @@ export async function sendChatMessage(messages: ChatMessage[]): Promise<string> 
       })
     });
 
-    if (res.ok) {
-      const data = await res.json();
-      if (data.text) {
-        return data.text.trim();
-      }
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.text) {
+      return data.text.trim();
+    }
+    // Limite de uso atingido: mostra o aviso do servidor em vez de simular resposta
+    if (res.status === 429 && data.message) {
+      return data.message;
     }
   } catch (serverErr) {
     console.warn('Rota /api/chat-assistant não respondeu:', serverErr);
   }
 
-  // 4. Fallback com Guardrails rigorosamente idênticos para não quebrar a experiência do usuário
+  // 2. Fallback com Guardrails rigorosamente idênticos para não quebrar a experiência do usuário
   return generateFallbackResponse(lastUserMessage, messages.slice(0, -1));
 }
