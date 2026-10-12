@@ -469,6 +469,20 @@ export const QuoteForm: React.FC<QuoteFormProps> = ({
     <section id="orcamento" className="py-16 sm:py-24 bg-surface relative scroll-mt-20">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: '-40px' }}
+          transition={{ duration: 0.5 }}
+          className="mb-10"
+        >
+          <span className="text-xs font-bold uppercase tracking-[0.2em] text-brand-red">Cotação</span>
+          <h2 className="mt-2 text-3xl sm:text-4xl font-extrabold text-brand-navy tracking-tight">
+            Peça seu orçamento
+          </h2>
+          <p className="mt-2 text-slate-500 max-w-md">Preencha os dados e envie sua lista de materiais.</p>
+        </motion.div>
+
+        <motion.div
           initial={{ opacity: 0, y: 32 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, margin: '-60px' }}
@@ -486,9 +500,9 @@ export const QuoteForm: React.FC<QuoteFormProps> = ({
                 <Clock className="w-3.5 h-3.5" />
                 Resposta rápida
               </span>
-              <h2 className="mt-5 text-3xl sm:text-4xl font-extrabold tracking-tight leading-[1.1]">
+              <h3 className="mt-5 text-3xl sm:text-4xl font-extrabold tracking-tight leading-[1.1]">
                 Sua cotação em <span className="text-brand-yellow">minutos</span>.
-              </h2>
+              </h3>
               <p className="mt-3 text-sm text-blue-100/80 max-w-sm">
                 Mande a lista e receba a proposta direto no WhatsApp.
               </p>
