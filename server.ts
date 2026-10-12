@@ -7,6 +7,8 @@ import initSqlJs, { Database } from 'sql.js';
 import crypto from 'crypto';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { Storage } from '@google-cloud/storage';
+import { findPage, sitemapXml, NOT_FOUND } from './src/seo/pages';
+import { renderHead } from './src/seo/head';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1767,6 +1769,12 @@ async function startServer() {
     return res.status(404).send('Imagem de pré-visualização não encontrada');
   });
 
+  // Sitemap gerado a partir das páginas cadastradas em src/seo/pages.ts
+  app.get('/sitemap.xml', (_req, res) => {
+    res.type('application/xml').setHeader('Cache-Control', 'public, max-age=3600');
+    res.send(sitemapXml());
+  });
+
   // Serve arquivos da pasta /public
   app.use(express.static(path.join(__dirname, 'public')));
 
@@ -1781,9 +1789,28 @@ async function startServer() {
   } else {
     // Modo de Produção
     const distPath = path.join(__dirname, 'dist');
-    app.use(express.static(distPath));
+    const indexHtml = fs.readFileSync(path.join(distPath, 'index.html'), 'utf-8');
+    // index: false para que "/" também passe pela montagem do <head> abaixo
+    app.use(express.static(distPath, { index: false }));
+
+    app.all('/api/*', (_req, res) => {
+      res.status(404).json({ status: 'error', message: 'Rota não encontrada' });
+    });
+
     app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      // Endereço com barra no final: redireciona para a versão sem barra
+      if (req.path.length > 1 && req.path.endsWith('/')) {
+        const query = req.originalUrl.slice(req.path.length);
+        return res.redirect(301, req.path.replace(/\/+$/, '') + query);
+      }
+      // Arquivo inexistente (ex.: /imagem.png): 404 simples
+      if (path.extname(req.path)) {
+        return res.status(404).send('Arquivo não encontrado');
+      }
+      const page = findPage(req.path);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.status(page ? 200 : 404).send(renderHead(indexHtml, page || NOT_FOUND));
     });
   }
 

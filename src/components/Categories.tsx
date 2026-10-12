@@ -2,17 +2,18 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Plus, Zap, Shield, Lightbulb, Box, Cpu, ToggleLeft, Check, ChevronLeft, ChevronRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Category } from '../types';
+import { categoryPathById } from '../seo/pages';
 
 interface CategoriesProps {
   onSelectCategory: (item: string) => void;
 }
 
-interface CategoryWithImages extends Category {
+export interface CategoryWithImages extends Category {
   icon: React.FC<{ className?: string }>;
   images: { url: string; label: string }[];
 }
 
-const CATEGORIES_DATA: CategoryWithImages[] = [
+export const CATEGORIES_DATA: CategoryWithImages[] = [
   {
     id: 'fios-cabos',
     title: 'Fios e Cabos',
@@ -220,7 +221,11 @@ const CategoryCard: React.FC<{
             <div className="w-10 h-10 rounded-xl bg-brand-yellow text-brand-navy flex items-center justify-center shrink-0 transition-transform duration-500 group-hover:rotate-[-8deg] group-hover:scale-110">
               <Icon className="w-5 h-5" />
             </div>
-            <h3 className="text-lg font-bold text-white leading-tight">{cat.title}</h3>
+            <h3 className="text-lg font-bold text-white leading-tight">
+              <a href={categoryPathById(cat.id)} className="hover:text-brand-yellow transition-colors">
+                {cat.title}
+              </a>
+            </h3>
           </div>
           <div className="flex gap-1 pb-1">
             {cat.images.map((_, i) => (

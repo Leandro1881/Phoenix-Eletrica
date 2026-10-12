@@ -14,10 +14,17 @@ import { LeadsModal } from './components/LeadsModal';
 import { AdminPage } from './components/AdminPage';
 import { GoogleReviews } from './components/GoogleReviews';
 import { AiQuoteAssistant } from './components/AiQuoteAssistant';
+import { CategoryPage, OtherCategories } from './components/CategoryPage';
+import { findPage, findCategoryPage, NOT_FOUND, QUOTE_PAGE } from './seo/pages';
+import { applyHead } from './seo/head';
 import { MessageSquare, Bot } from 'lucide-react';
 import { MotionConfig } from 'motion/react';
 import { ReviewsData } from './types';
 import { trackWhatsAppClick } from './utils/analytics';
+
+// Página atual (cada página do site é um endereço próprio, carregado do servidor)
+const currentPage = findPage(window.location.pathname) ?? NOT_FOUND;
+const currentCategoryPage = findCategoryPage(window.location.pathname);
 
 export default function App() {
   const [selectedMaterial, setSelectedMaterial] = useState<string>('');
@@ -38,6 +45,19 @@ export default function App() {
       window.location.hash === '#admin-page'
     );
   });
+
+  // Título, descrição e canonical da página atual
+  useEffect(() => {
+    applyHead(isAdminRoute ? findPage('/admin')! : currentPage);
+  }, [isAdminRoute]);
+
+  // Links do tipo /#categorias vindos de outras páginas: rola até a seção após renderizar
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (!id || id.includes('admin') || id === 'painel') return;
+    const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' }), 300);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Consulta avaliações do Google dinâmicas do SQLite
   const refreshReviews = async () => {
@@ -167,12 +187,45 @@ export default function App() {
       {/* Header com Logo Phoenix Elétrica e Botão WhatsApp Oficial */}
       <Header 
         onSearch={(term) => setSelectedMaterial(term)}
-        onSelectCategory={handleSelectCategory}
         reviewsData={reviewsData}
       />
 
       {/* Main Content */}
       <main className="flex-1">
+        {currentCategoryPage ? (
+          <>
+            <CategoryPage page={currentCategoryPage} onQuote={handleSelectCategory} />
+            <QuoteForm
+              initialMaterial={selectedMaterial}
+              onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+            />
+            <OtherCategories currentPath={currentCategoryPage.path} />
+          </>
+        ) : currentPage === QUOTE_PAGE ? (
+          <>
+            <QuoteForm
+              asPage
+              initialMaterial={selectedMaterial}
+              onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+            />
+            <GoogleReviews reviewsData={reviewsData} onReviewAdded={refreshReviews} />
+          </>
+        ) : currentPage === NOT_FOUND ? (
+          <section className="py-28 text-center px-4">
+            <span className="text-xs font-bold uppercase tracking-[0.2em] text-brand-red">Erro 404</span>
+            <h1 className="mt-2 text-3xl sm:text-4xl font-extrabold text-brand-navy tracking-tight">Página não encontrada</h1>
+            <p className="mt-3 text-slate-500">O endereço acessado não existe.</p>
+            <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
+              <a href="/" className="inline-flex items-center justify-center h-12 px-6 rounded-full bg-brand-navy text-white font-bold">
+                Ir para a página inicial
+              </a>
+              <a href="/cotacao" className="inline-flex items-center justify-center h-12 px-6 rounded-full bg-brand-yellow text-brand-navy font-bold">
+                Fazer uma cotação
+              </a>
+            </div>
+          </section>
+        ) : (
+        <>
         {/* Hero Section: Foco em agilidade para obras e instalações */}
         <Hero 
           onScrollToQuote={handleScrollToQuote} 
@@ -197,6 +250,8 @@ export default function App() {
           reviewsData={reviewsData}
           onReviewAdded={refreshReviews}
         />
+        </>
+        )}
       </main>
 
       {/* Footer limpo sem botões para clientes; gatilho secreto via 3 cliques no copyright */}

@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { MessageSquare, MapPin, Clock, Phone, Mail, ShieldCheck } from 'lucide-react';
+import { MessageSquare, MapPin, Clock, Phone, Mail, ShieldCheck, FileText } from 'lucide-react';
 import { PhoenixLogo } from './PhoenixLogo';
 import { navCategories } from './Header';
 import { trackWhatsAppClick } from '../utils/analytics';
@@ -52,7 +52,7 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
             <ul className="space-y-2.5">
               {navCategories.map((item) => (
                 <li key={item.targetId}>
-                  <a href={`#${item.targetId}`} className="hover:text-white transition-colors">
+                  <a href={item.path} className="hover:text-white transition-colors">
                     {item.label}
                   </a>
                 </li>
@@ -63,6 +63,12 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
           <div className="md:col-span-5">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-white mb-4">Atendimento</h2>
             <ul className="space-y-3">
+              <li>
+                <a href="/cotacao" className="flex items-center gap-3 font-semibold text-brand-yellow hover:text-white transition-colors">
+                  <FileText className="w-4 h-4 shrink-0" />
+                  Faça sua cotação
+                </a>
+              </li>
               <li>
                 <a href="tel:1133527777" className="flex items-center gap-3 hover:text-white transition-colors">
                   <Phone className="w-4 h-4 text-brand-yellow shrink-0" />

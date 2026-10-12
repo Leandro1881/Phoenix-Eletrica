@@ -15,20 +15,19 @@ import { trackWhatsAppClick } from '../utils/analytics';
 
 interface HeaderProps {
   onSearch?: (term: string) => void;
-  onSelectCategory?: (category: string) => void;
   reviewsData?: ReviewsData;
 }
 
 const WHATSAPP_URL =
   'https://wa.me/5511983239782?text=Ol%C3%A1!%20Gostaria%20de%20informa%C3%A7%C3%B5es%20e%20or%C3%A7amento%20de%20materiais%20el%C3%A9tricos%20com%20a%20Phoenix%20El%C3%A9trica.';
 
-export const navCategories = [
-  { label: 'Fios e Cabos', category: 'Cabos e Fios de Cobre', targetId: 'fios-cabos' },
-  { label: 'Disjuntores e Quadros', category: 'Disjuntores e Proteção Elétrica', targetId: 'disjuntores-quadros' },
-  { label: 'Iluminação LED', category: 'Iluminação Industrial e Residencial', targetId: 'iluminacao-led' },
-  { label: 'Infraestrutura', category: 'Infraestrutura e Eletrodutos', targetId: 'infraestrutura' },
-  { label: 'Tomadas e Acabamentos', category: 'Tomadas e Linhas de Acabamento', targetId: 'tomadas-acabamentos' },
-  { label: 'Automação e Comandos', category: 'Automação e Comandos Elétricos', targetId: 'automacao-comandos' }
+export const navCategories: { label: string; category: string; targetId: string; path: string }[] = [
+  { label: 'Fios e Cabos', category: 'Cabos e Fios de Cobre', targetId: 'fios-cabos', path: '/fios-e-cabos' },
+  { label: 'Disjuntores e Quadros', category: 'Disjuntores e Proteção Elétrica', targetId: 'disjuntores-quadros', path: '/disjuntores-e-quadros' },
+  { label: 'Iluminação LED', category: 'Iluminação Industrial e Residencial', targetId: 'iluminacao-led', path: '/iluminacao-led' },
+  { label: 'Infraestrutura', category: 'Infraestrutura e Eletrodutos', targetId: 'infraestrutura', path: '/infraestrutura-eletrica' },
+  { label: 'Tomadas e Acabamentos', category: 'Tomadas e Linhas de Acabamento', targetId: 'tomadas-acabamentos', path: '/tomadas-e-interruptores' },
+  { label: 'Automação e Comandos', category: 'Automação e Comandos Elétricos', targetId: 'automacao-comandos', path: '/automacao-e-comandos' }
 ];
 
 const navLinks = [
@@ -37,12 +36,14 @@ const navLinks = [
   { label: 'Contato', targetId: 'contato' }
 ];
 
+// Rola até a seção; fora da página inicial (seção inexistente) leva até ela na home
 const scrollToId = (id: string) => {
   const el = document.getElementById(id);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  else window.location.href = `/#${id}`;
 };
 
-export const Header: React.FC<HeaderProps> = ({ onSearch, onSelectCategory }) => {
+export const Header: React.FC<HeaderProps> = ({ onSearch }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
@@ -85,20 +86,6 @@ export const Header: React.FC<HeaderProps> = ({ onSearch, onSelectCategory }) =>
     scrollToId('orcamento');
     setIsMobileMenuOpen(false);
     setIsSearchOpen(false);
-  };
-
-  const handleCategoryClick = (targetId: string, category: string) => {
-    setIsMobileMenuOpen(false);
-    setIsProductsOpen(false);
-    onSelectCategory?.(category);
-    const targetEl = document.getElementById(targetId);
-    if (targetEl) {
-      targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      targetEl.classList.add('ring-2', 'ring-brand-blue');
-      setTimeout(() => targetEl.classList.remove('ring-2', 'ring-brand-blue'), 1500);
-    } else {
-      scrollToId('categorias');
-    }
   };
 
   const goTo = (id: string) => {
@@ -149,15 +136,14 @@ export const Header: React.FC<HeaderProps> = ({ onSearch, onSelectCategory }) =>
                   >
                     <div className="rounded-2xl bg-white p-2 shadow-2xl shadow-slate-900/10 ring-1 ring-slate-200">
                       {navCategories.map((item) => (
-                        <button
+                        <a
                           key={item.targetId}
-                          type="button"
-                          onClick={() => handleCategoryClick(item.targetId, item.category)}
-                          className="group w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-sm text-slate-700 hover:bg-brand-blue-soft hover:text-brand-blue transition-colors cursor-pointer"
+                          href={item.path}
+                          className="group w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-left text-sm text-slate-700 hover:bg-brand-blue-soft hover:text-brand-blue transition-colors"
                         >
                           {item.label}
                           <ArrowRight className="w-4 h-4 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all" />
-                        </button>
+                        </a>
                       ))}
                     </div>
                   </motion.div>
@@ -298,18 +284,17 @@ export const Header: React.FC<HeaderProps> = ({ onSearch, onSelectCategory }) =>
                 <div>
                   <div className="px-2 pb-2 text-[11px] font-bold uppercase tracking-widest text-slate-400">Produtos</div>
                   {navCategories.map((item, i) => (
-                    <motion.button
+                    <motion.a
                       key={item.targetId}
-                      type="button"
+                      href={item.path}
                       initial={{ opacity: 0, x: 16 }}
                       animate={{ opacity: 1, x: 0 }}
                       transition={{ delay: 0.05 * i }}
-                      onClick={() => handleCategoryClick(item.targetId, item.category)}
-                      className="w-full flex items-center justify-between px-2 py-3 rounded-xl text-sm font-medium text-slate-700 hover:bg-brand-blue-soft hover:text-brand-blue cursor-pointer"
+                      className="w-full flex items-center justify-between px-2 py-3 rounded-xl text-sm font-medium text-slate-700 hover:bg-brand-blue-soft hover:text-brand-blue"
                     >
                       {item.label}
                       <ChevronRight className="w-4 h-4 text-slate-300" />
-                    </motion.button>
+                    </motion.a>
                   ))}
                 </div>
 

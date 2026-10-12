@@ -12,6 +12,8 @@ interface QuoteFormProps {
   initialMaterial?: string;
   onLeadSubmitted?: () => void;
   onOpenAiAssistant?: () => void;
+  // Na página /cotacao o título da seção é o h1 da página
+  asPage?: boolean;
 }
 
 // URL do endpoint oficial da AWS Lambda para captação de leads
@@ -27,7 +29,8 @@ const TURNSTILE_TEST_TOKEN = 'XXXX.DUMMY.TOKEN.XXXX';
 export const QuoteForm: React.FC<QuoteFormProps> = ({ 
   initialMaterial = '', 
   onLeadSubmitted,
-  onOpenAiAssistant
+  onOpenAiAssistant,
+  asPage = false
 }) => {
   const [nome, setNome] = useState('');
   const [email, setEmail] = useState('');
@@ -476,9 +479,15 @@ export const QuoteForm: React.FC<QuoteFormProps> = ({
           className="mb-10"
         >
           <span className="text-xs font-bold uppercase tracking-[0.2em] text-brand-red">Cotação</span>
-          <h2 className="mt-2 text-3xl sm:text-4xl font-extrabold text-brand-navy tracking-tight">
-            Peça seu orçamento
-          </h2>
+          {asPage ? (
+            <h1 className="mt-2 text-3xl sm:text-4xl font-extrabold text-brand-navy tracking-tight">
+              Faça sua cotação de materiais elétricos
+            </h1>
+          ) : (
+            <h2 className="mt-2 text-3xl sm:text-4xl font-extrabold text-brand-navy tracking-tight">
+              Peça seu orçamento
+            </h2>
+          )}
           <p className="mt-2 text-slate-500 max-w-md">Preencha os dados e envie sua lista de materiais.</p>
         </motion.div>
 
