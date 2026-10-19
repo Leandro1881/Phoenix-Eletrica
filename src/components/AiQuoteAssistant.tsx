@@ -16,6 +16,7 @@ import {
   QuoteItem,
   AgentStage,
   sendChatMessage,
+  formatItem,
   formatList
 } from '../services/aiService';
 
@@ -42,9 +43,11 @@ interface ChatState {
   messages: ChatMessage[];
   items: QuoteItem[];
   stage: AgentStage;
+  // Itens já colocados no formulário (formatados): numa nova confirmação, só os novos vão para lá
+  applied: string[];
 }
 
-const freshState = (): ChatState => ({ messages: [welcomeMessage()], items: [], stage: 'coletando' });
+const freshState = (): ChatState => ({ messages: [welcomeMessage()], items: [], stage: 'coletando', applied: [] });
 
 function loadStoredState(): ChatState {
   if (typeof window === 'undefined') return freshState();
@@ -53,13 +56,13 @@ function loadStoredState(): ChatState {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return freshState();
     const parsed = JSON.parse(raw);
-    // Lista já enviada ao formulário: recomeça a conversa
-    if (parsed?.stage === 'confirmado') return freshState();
+    // A conversa continua mesmo depois de a lista ir para o formulário
     if (Array.isArray(parsed?.messages) && parsed.messages.length > 0) {
       return {
         messages: parsed.messages.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })),
         items: Array.isArray(parsed.items) ? parsed.items : [],
-        stage: parsed.stage === 'aguardando_confirmacao' ? 'aguardando_confirmacao' : 'coletando'
+        stage: parsed.stage === 'aguardando_confirmacao' || parsed.stage === 'confirmado' ? parsed.stage : 'coletando',
+        applied: Array.isArray(parsed.applied) ? parsed.applied.filter((a: unknown) => typeof a === 'string') : []
       };
     }
   } catch (e) {
@@ -139,7 +142,7 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
   onClose
 }) => {
   const [chat, setChat] = useState<ChatState>(loadStoredState);
-  const { messages, items, stage } = chat;
+  const { messages, items, stage, applied } = chat;
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [justApplied, setJustApplied] = useState(false);
@@ -194,22 +197,21 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
         timestamp: new Date()
       };
 
+      // Cliente deu OK: só os itens ainda não enviados vão para o formulário. A conversa continua aberta.
+      const confirmed = result.stage === 'confirmado' && result.items.length > 0;
+      const newItems = confirmed ? result.items.filter((it) => !applied.includes(formatItem(it))) : [];
+
       setChat((prev) => ({
         messages: [...prev.messages, assistantMessage],
         items: result.items,
-        stage: result.stage
+        stage: result.stage,
+        applied: newItems.length ? [...prev.applied, ...newItems.map(formatItem)] : prev.applied
       }));
 
-      // Cliente deu OK na lista: vai para o formulário e a conversa recomeça na próxima abertura
-      if (result.stage === 'confirmado' && result.items.length) {
-        onApplyMaterials(formatList(result.items));
+      if (newItems.length) {
+        onApplyMaterials(formatList(newItems));
         setJustApplied(true);
-        setTimeout(() => {
-          setJustApplied(false);
-          setChat(freshState());
-          setShowList(false);
-          if (onClose) onClose();
-        }, 2500);
+        setTimeout(() => setJustApplied(false), 3000);
       }
     } finally {
       setIsLoading(false);
@@ -361,7 +363,7 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
       <div className="p-3 bg-white border-t border-slate-200 space-y-2 shrink-0">
 
         {/* Itens anotados (só para conferência; a lista vai ao orçamento quando o cliente responde OK) */}
-        {items.length > 0 && stage === 'coletando' && !justApplied && (
+        {items.length > 0 && stage !== 'aguardando_confirmacao' && !justApplied && (
           <div className="text-[11px]">
             <button
               type="button"

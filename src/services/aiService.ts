@@ -1,7 +1,7 @@
 import type { AgentStage, QuoteItem } from '../ai/quoteAgent';
 
 export type { AgentStage, QuoteItem } from '../ai/quoteAgent';
-export { formatList } from '../ai/quoteAgent';
+export { formatItem, formatList } from '../ai/quoteAgent';
 
 export interface ChatMessage {
   id: string;

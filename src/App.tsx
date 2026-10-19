@@ -102,8 +102,8 @@ export default function App() {
       if (!prev || prev.trim() === '') return newMaterials;
       return `${prev}\n\n[Itens Adicionados pelo Assistente IA]:\n${newMaterials}`;
     });
+    // Assistente continua aberto: a conversa segue e o cliente fecha quando quiser
     handleScrollToQuote();
-    setIsAiAssistantOpen(false);
   };
 
   // Página do painel: renderiza só o painel (login com 2FA)

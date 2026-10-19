@@ -41,8 +41,9 @@ COMO TRABALHAR
 ETAPAS
 - "coletando": o cliente ainda está montando a lista.
 - "aguardando_confirmacao": use quando o cliente disser que terminou (ex.: "só isso", "pode fechar", "é isso", "finalizar") e a lista tiver pelo menos 1 item.
-- "confirmado": use somente se a ETAPA ANTERIOR for "aguardando_confirmacao" e o cliente confirmar (ok, sim, pode, confirmo, isso mesmo).
+- "confirmado": use somente se a ETAPA ANTERIOR for "aguardando_confirmacao" e o cliente concordar de qualquer jeito (ok, sim, pode, confirmo, isso mesmo, só isso, é isso, tá certo, pode incluir, beleza etc.).
 - Se, na confirmação, o cliente pedir mudança, aplique a mudança e use "aguardando_confirmacao" de novo.
+- Se a ETAPA ANTERIOR for "confirmado", a lista já foi para o orçamento. Continue a conversa normalmente: novos pedidos entram na mesma lista e seguem o mesmo fluxo.
 
 CAMPOS DE CADA ITEM
 - "produto": o produto como o cliente pediu, só corrigindo a grafia (ex.: "Cabo flexível 750V", "Disjuntor DIN curva C").
@@ -111,14 +112,25 @@ export function formatList(items: QuoteItem[]): string {
 
 const CONFIRM_RE = /^(ok(ay)?|sim|s|pode( sim)?( enviar| mandar| colocar| inserir)?|confirmo|confirmado|isso( mesmo)?|certo|correto|perfeito|fechado|beleza|blz|manda|pode ser|tudo certo|est[aá] certo|t[aá] certo)[\s!.,👍✅]*$/i;
 
-export const isConfirmation = (text: string) => CONFIRM_RE.test(text.trim());
+// Qualquer mensagem que concorda ("só isso", "pode incluir", "tá ótimo") confirma, desde que não peça mudança
+const AFFIRM_RE = /(^|[^\p{L}])(ok|okay|sim|pode|confirm\p{L}*|certo|certinho|correto|isso|perfeito|fechado|fechou|beleza|blz|manda|show|[oó]timo|top|exato|bora|vamos|inclu\p{L}*|coloc\p{L}*|segue)($|[^\p{L}])|👍|✅/iu;
+const CHANGE_RE = /(^|[^\p{L}])(n[aã]o|muda\p{L}*|troca\p{L}*|tira\p{L}*|remov\p{L}*|exclu\p{L}*|apaga\p{L}*|falt\p{L}*|adicion\p{L}*|acrescent\p{L}*|errad\p{L}*|corrig\p{L}*|espera|calma|menos)($|[^\p{L}])/iu;
 
-export function confirmationPrompt(items: QuoteItem[]): string {
-  return `Confira sua lista:\n\n${formatList(items)}\n\nEstá tudo certo? Responda **OK** para eu colocar essa lista no seu pedido de orçamento, ou diga o que quer mudar.`;
+export function isConfirmation(text: string): boolean {
+  const t = text.trim();
+  if (CONFIRM_RE.test(t)) return true;
+  if (!t || t.length > 120 || looksElectrical(t) || CHANGE_RE.test(t)) return false;
+  return AFFIRM_RE.test(t) || FINISH_RE.test(t);
 }
 
-export const CONFIRMED_TEXT =
-  'Pronto! Coloquei a lista no formulário de orçamento. Agora é só preencher seu nome e telefone e enviar. O balcão da Phoenix Elétrica responde com preços e prazos.';
+export function confirmationPrompt(items: QuoteItem[]): string {
+  return `Confira sua lista:\n\n${formatList(items)}\n\nEstá tudo certo? Se sim, é só confirmar (ex.: **OK** ou "só isso") que eu coloco no seu orçamento. Se quiser mudar algo, me diga.`;
+}
+
+export function confirmedText(items: QuoteItem[]): string {
+  const head = items.length === 1 ? 'Produto incluído' : 'Produtos incluídos';
+  return `✅ ${head} no orçamento com sucesso! Agora é só preencher seu nome e telefone no formulário e enviar. Se quiser mais alguma coisa, é só voltar aqui.`;
+}
 
 const EMPTY_LIST_TEXT = 'Ainda não anotei nenhum material. Quais produtos você precisa?';
 
@@ -136,7 +148,7 @@ export function finalizeReply(
   if (stage === 'confirmado' && prevStage !== 'aguardando_confirmacao') stage = 'aguardando_confirmacao';
 
   if (stage === 'confirmado') {
-    return { text: CONFIRMED_TEXT, items: prevItems, stage };
+    return { text: confirmedText(prevItems), items: prevItems, stage };
   }
   if (stage === 'aguardando_confirmacao') {
     if (!modelItems.length) return { text: EMPTY_LIST_TEXT, items: [], stage: 'coletando' };
@@ -215,7 +227,7 @@ export function fallbackReply(messages: AgentMessage[], prevItems: QuoteItem[], 
   const items = [...prevItems];
 
   if (prevStage === 'aguardando_confirmacao' && isConfirmation(last)) {
-    return { text: CONFIRMED_TEXT, items, stage: 'confirmado' };
+    return { text: confirmedText(items), items, stage: 'confirmado' };
   }
 
   const removeMatch = last.match(REMOVE_RE);

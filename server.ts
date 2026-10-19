@@ -27,7 +27,7 @@ import {
   AGENT_RESPONSE_SCHEMA,
   AgentMessage,
   AgentReply,
-  CONFIRMED_TEXT,
+  confirmedText,
   buildStateInstruction,
   fallbackReply,
   finalizeReply,
@@ -968,7 +968,7 @@ async function startServer() {
 
       // OK na etapa de confirmação: resposta fixa, sem gastar chamada de IA
       if (prevStage === 'aguardando_confirmacao' && isConfirmation(lastText)) {
-        return send('rules', { text: CONFIRMED_TEXT, items: prevItems, stage: 'confirmado' });
+        return send('rules', { text: confirmedText(prevItems), items: prevItems, stage: 'confirmado' });
       }
 
       const systemInstruction = AGENT_SYSTEM_PROMPT + buildStateInstruction(prevItems, prevStage);
