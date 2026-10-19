@@ -3,6 +3,7 @@ import { Plus, Zap, Shield, Lightbulb, Box, Cpu, ToggleLeft, Check, ChevronLeft,
 import { motion, AnimatePresence } from 'motion/react';
 import { Category } from '../types';
 import { categoryPathById } from '../seo/pages';
+import { unsplashSrcSet } from '../utils/images';
 
 interface CategoriesProps {
   onSelectCategory: (item: string) => void;
@@ -195,6 +196,8 @@ const CategoryCard: React.FC<{
           <motion.img
             key={imageIndex}
             src={cat.images[imageIndex].url}
+            srcSet={unsplashSrcSet(cat.images[imageIndex].url, [400, 800])}
+            sizes="(min-width: 768px) 33vw, 82vw"
             alt={`${cat.title} - ${cat.images[imageIndex].label}`}
             width={800}
             height={600}

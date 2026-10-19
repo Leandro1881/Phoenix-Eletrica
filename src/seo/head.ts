@@ -1,4 +1,5 @@
 import { SITE_URL, SeoPage, breadcrumbJsonLd } from './pages';
+import { unsplashSrcSet, HERO_FIRST_IMAGE, HERO_SRCSET_WIDTHS, HERO_SIZES } from '../utils/images';
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -27,6 +28,16 @@ export const renderHead = (html: string, page: SeoPage): string => {
     out = out
       .replace(/(<link rel="canonical" href=")[^"]*(")/, `$1${urlOf(page)}$2`)
       .replace(/(<meta property="og:url" content=")[^"]*(")/, `$1${urlOf(page)}$2`);
+  }
+
+  // Página inicial: começa a baixar a foto do topo (maior elemento da tela) junto com o HTML
+  if (page.path === '/') {
+    const srcset = escapeHtml(unsplashSrcSet(HERO_FIRST_IMAGE, HERO_SRCSET_WIDTHS));
+    out = out.replace(
+      '</head>',
+      `  <link rel="preload" as="image" href="${escapeHtml(HERO_FIRST_IMAGE)}" imagesrcset="${srcset}" imagesizes="${HERO_SIZES}" fetchpriority="high" />
+  </head>`
+    );
   }
 
   const crumbs = breadcrumbJsonLd(page);

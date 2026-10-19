@@ -3,6 +3,7 @@ import { ArrowRight, Check, ChevronRight, MessageSquare } from 'lucide-react';
 import { CATEGORIES_DATA } from './Categories';
 import { CATEGORY_PAGES, CategoryPage as CategoryPageData } from '../seo/pages';
 import { trackWhatsAppClick } from '../utils/analytics';
+import { unsplashSrcSet } from '../utils/images';
 
 interface CategoryPageProps {
   page: CategoryPageData;
@@ -73,6 +74,8 @@ export const CategoryPage: React.FC<CategoryPageProps> = ({ page, onQuote }) => 
             <div className="lg:col-span-5">
               <img
                 src={image.url}
+                srcSet={unsplashSrcSet(image.url, [400, 800])}
+                sizes="(min-width: 1024px) 40vw, 100vw"
                 alt={`${page.name}: ${image.label}`}
                 width={800}
                 height={600}

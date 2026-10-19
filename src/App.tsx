@@ -3,15 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { Header } from './components/Header';
 import { Hero } from './components/Hero';
 import { Categories } from './components/Categories';
 import { Features } from './components/Features';
 import { QuoteForm } from './components/QuoteForm';
 import { Footer } from './components/Footer';
-import { LeadsModal } from './components/LeadsModal';
-import { AdminPage } from './components/AdminPage';
 import { GoogleReviews } from './components/GoogleReviews';
 import { AiQuoteAssistant } from './components/AiQuoteAssistant';
 import { CategoryPage, OtherCategories } from './components/CategoryPage';
@@ -21,6 +19,10 @@ import { MessageSquare, Bot } from 'lucide-react';
 import { MotionConfig } from 'motion/react';
 import { ReviewsData } from './types';
 import { trackWhatsAppClick } from './utils/analytics';
+
+// Painel do lojista: baixado só quando aberto, para não pesar no carregamento do site
+const LeadsModal = lazy(() => import('./components/LeadsModal').then((m) => ({ default: m.LeadsModal })));
+const AdminPage = lazy(() => import('./components/AdminPage').then((m) => ({ default: m.AdminPage })));
 
 // Página atual (cada página do site é um endereço próprio, carregado do servidor)
 const currentPage = findPage(window.location.pathname) ?? NOT_FOUND;
@@ -177,7 +179,11 @@ export default function App() {
 
   // Se a rota atual for /admin, renderiza a Página Dedicada do Administrador
   if (isAdminRoute) {
-    return <AdminPage onNavigateHome={navigateToHome} />;
+    return (
+      <Suspense fallback={null}>
+        <AdminPage onNavigateHome={navigateToHome} />
+      </Suspense>
+    );
   }
 
   return (
@@ -258,11 +264,15 @@ export default function App() {
       <Footer onSecretAdminTrigger={() => setIsLeadsModalOpen(true)} />
 
       {/* Painel do Lojista Protegido com Login e Senha */}
-      <LeadsModal
-        isOpen={isLeadsModalOpen}
-        onClose={handleCloseAdminModal}
-        onOpenFullScreen={navigateToAdmin}
-      />
+      {isLeadsModalOpen && (
+        <Suspense fallback={null}>
+          <LeadsModal
+            isOpen={isLeadsModalOpen}
+            onClose={handleCloseAdminModal}
+            onOpenFullScreen={navigateToAdmin}
+          />
+        </Suspense>
+      )}
 
       {/* Widget Flutuante do Assistente IA (Lado Esquerdo - Mantido montado para preservar histórico) */}
       <div 

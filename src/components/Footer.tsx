@@ -62,6 +62,7 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
 
           <div className="md:col-span-5">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-white mb-4">Atendimento</h2>
+            <address className="not-italic">
             <ul className="space-y-3">
               <li>
                 <a href="/cotacao" className="flex items-center gap-3 font-semibold text-brand-yellow hover:text-white transition-colors">
@@ -88,9 +89,9 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
                 </a>
               </li>
               <li>
-                <a href="mailto:orcamentos@phoenixeletrica.com.br" className="flex items-center gap-3 hover:text-white transition-colors">
+                <a href="mailto:phoenix@phoenixel.com.br" className="flex items-center gap-3 hover:text-white transition-colors">
                   <Mail className="w-4 h-4 text-brand-yellow shrink-0" />
-                  orcamentos@phoenixeletrica.com.br
+                  phoenix@phoenixel.com.br
                 </a>
               </li>
               <li>
@@ -106,9 +107,10 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
               </li>
               <li className="flex items-center gap-3">
                 <Clock className="w-4 h-4 text-slate-500 shrink-0" />
-                Seg a sex, 07:30 às 17:30
+                Seg a sex, 08:00 às 17:30
               </li>
             </ul>
+            </address>
           </div>
         </div>
 

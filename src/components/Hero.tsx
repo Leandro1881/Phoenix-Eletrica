@@ -3,6 +3,7 @@ import { ArrowRight, MessageSquare, Star, Package, Clock, ShieldCheck } from 'lu
 import { motion, AnimatePresence, animate, useInView } from 'motion/react';
 import { ReviewsData } from '../types';
 import { trackWhatsAppClick } from '../utils/analytics';
+import { unsplashSrcSet, HERO_FIRST_IMAGE, HERO_SRCSET_WIDTHS, HERO_SIZES } from '../utils/images';
 
 interface HeroProps {
   onScrollToQuote: () => void;
@@ -20,7 +21,7 @@ const SLIDES = [
       </>
     ),
     subtitle: 'Fios, disjuntores, quadros e LED para sua obra ou reforma.',
-    image: 'https://images.unsplash.com/photo-1621905251189-08b45d6a269e?auto=format&fit=crop&w=1600&q=80'
+    image: HERO_FIRST_IMAGE
   },
   {
     title: (
@@ -124,6 +125,8 @@ export const Hero: React.FC<HeroProps> = ({ onScrollToQuote, reviewsData }) => {
           >
             <motion.img
               src={slide.image}
+              srcSet={unsplashSrcSet(slide.image, HERO_SRCSET_WIDTHS)}
+              sizes={HERO_SIZES}
               alt=""
               width={1600}
               height={1067}

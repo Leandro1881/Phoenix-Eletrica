@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- Símbolo do logo Phoenix Elétrica (lâmpada + raio), simplificado para tamanhos pequenos -->
+  <rect width="120" height="120" rx="26" fill="#ffffff"/>
+  <path d="M 45 15 L 52 32 L 68 18 L 65 38 L 85 30 L 75 48 L 98 46 L 82 60 L 95 72 L 78 72 L 80 88 L 66 78 L 60 96 L 50 80 L 36 94 L 38 74 L 18 78 L 30 62 L 12 50 L 32 44 L 22 26 L 40 34 Z" fill="none" stroke="#0022cc" stroke-width="4" stroke-linejoin="round"/>
+  <path d="M 76 18 L 62 46 L 74 46 L 36 98 L 48 58 L 36 58 Z" fill="#FFEA00" stroke="#0022cc" stroke-width="2.5" stroke-linejoin="round"/>
+  <circle cx="58" cy="54" r="24" fill="#ffffff" stroke="#0022cc" stroke-width="8"/>
+  <g transform="translate(68, 65) rotate(42)" fill="#0022cc">
+    <path d="M 0 0 L 16 0 L 15 5 L 1 5 Z"/>
+    <path d="M 1 6 L 15 6 L 14 10 L 2 10 Z"/>
+    <path d="M 2 11 L 14 11 L 13 15 L 3 15 Z"/>
+    <path d="M 3 16 L 13 16 L 12 19 L 4 19 Z"/>
+    <path d="M 4 20 Q 8 24 12 20 Z"/>
+  </g>
+</svg>

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import compression from 'compression';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -466,6 +467,8 @@ async function startServer() {
   await setupDatabase();
 
   const app = express();
+  // Compressão gzip/brotli das respostas (HTML, JS, CSS, JSON): páginas mais rápidas
+  app.use(compression());
   // Atrás de 1 proxy (Cloud Run / load balancer): req.ip passa a ser o IP real do visitante
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '50mb' }));
@@ -1775,8 +1778,8 @@ async function startServer() {
     res.send(sitemapXml());
   });
 
-  // Serve arquivos da pasta /public
-  app.use(express.static(path.join(__dirname, 'public')));
+  // Serve arquivos da pasta /public (ícones, robots.txt): cache de 1 dia
+  app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1d' }));
 
   // Modo de Desenvolvimento com Vite Middleware
   if (process.env.NODE_ENV !== 'production') {
@@ -1791,7 +1794,9 @@ async function startServer() {
     const distPath = path.join(__dirname, 'dist');
     const indexHtml = fs.readFileSync(path.join(distPath, 'index.html'), 'utf-8');
     // index: false para que "/" também passe pela montagem do <head> abaixo
-    app.use(express.static(distPath, { index: false }));
+    // Arquivos de /assets têm hash no nome: cache de 1 ano sem revalidar
+    app.use('/assets', express.static(path.join(distPath, 'assets'), { maxAge: '1y', immutable: true }));
+    app.use(express.static(distPath, { index: false, maxAge: '1d' }));
 
     app.all('/api/*', (_req, res) => {
       res.status(404).json({ status: 'error', message: 'Rota não encontrada' });
