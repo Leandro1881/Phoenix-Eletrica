@@ -199,7 +199,8 @@ const LEADING_FILLER_RE = /^(e|tamb[eé]m|mais|preciso de|preciso|quero|queria|v
 function splitItems(text: string): string[] {
   return text
     .replace(/^[\p{Extended_Pictographic}\s]+/u, '')
-    .split(/\s*(?:[,;\n]|\s\+\s|\se\s)\s*/)
+    // Vírgula separa itens, exceto a vírgula decimal (2,5mm²)
+    .split(/\s*(?:,(?!\d)|(?<!\d),|[;\n]|\s\+\s|\se\s)\s*/)
     .map((s) => {
       let part = s.trim();
       while (LEADING_FILLER_RE.test(part)) part = part.replace(LEADING_FILLER_RE, '');
