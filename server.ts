@@ -482,6 +482,17 @@ async function startServer() {
     app.use((req, res) => res.redirect(redirectStatus, REDIRECT_TO_ORIGIN + req.originalUrl));
   }
 
+  // Domínio oficial único para SEO: www e *.run.app vão com 301 para CANONICAL_HOST.
+  // Só redireciona quando o host é diferente, então não há loop.
+  const CANONICAL_HOST = (process.env.CANONICAL_HOST || '').toLowerCase();
+  if (CANONICAL_HOST) {
+    app.use((req, res, next) => {
+      const host = (req.get('host') || '').toLowerCase().split(':')[0];
+      if (!host || host === CANONICAL_HOST || host === 'localhost' || host === '127.0.0.1') return next();
+      res.redirect(301, `https://${CANONICAL_HOST}${req.originalUrl}`);
+    });
+  }
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 

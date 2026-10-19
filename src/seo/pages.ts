@@ -2,10 +2,10 @@
 // Usado pelo navegador (React) e pelo servidor (server.ts), que monta o <head>
 // de cada endereço, o sitemap.xml e responde 404 para endereços desconhecidos.
 
-export const SITE_URL = 'https://phoenix-el-trica-distribuidora-de-materiais-el-tr.ai.studio';
+export const SITE_URL = 'https://phoenixel.com.br';
 
 // Data da última alteração de conteúdo (vai para o <lastmod> do sitemap)
-export const LAST_MODIFIED = '2026-10-12';
+export const LAST_MODIFIED = '2026-10-18';
 
 export interface SeoPage {
   path: string;
