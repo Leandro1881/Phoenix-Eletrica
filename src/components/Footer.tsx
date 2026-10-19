@@ -97,6 +97,29 @@ export const Footer: React.FC = () => {
           </p>
           <p>CNPJ 45.128.940/0001-82</p>
         </div>
+
+        {/* Crédito do desenvolvedor */}
+        <p className="mt-4 text-center text-xs text-slate-500">
+          Desenvolvido por{' '}
+          <a
+            href="https://www.leandrobaccarin.com.br"
+            target="_blank"
+            rel="noopener"
+            className="text-slate-400 hover:text-white underline-offset-2 hover:underline"
+          >
+            Leandro Baccarin
+          </a>
+          , web developer ·{' '}
+          <a
+            href="https://wa.me/5511959746063"
+            target="_blank"
+            rel="noopener"
+            className="text-slate-400 hover:text-white underline-offset-2 hover:underline"
+            aria-label="WhatsApp do desenvolvedor: (11) 95974-6063"
+          >
+            (11) 95974-6063
+          </a>
+        </p>
       </div>
     </footer>
   );
