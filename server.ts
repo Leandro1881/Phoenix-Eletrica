@@ -464,13 +464,24 @@ async function setupDatabase() {
 }
 
 async function startServer() {
-  await setupDatabase();
+  // Serviço desativado: manda todo acesso para o endereço oficial e não abre o banco.
+  // Evita dois servidores gravando no mesmo arquivo SQLite do bucket.
+  const REDIRECT_TO_ORIGIN = (process.env.REDIRECT_TO_ORIGIN || '').replace(/\/+$/, '');
+  if (!REDIRECT_TO_ORIGIN) {
+    await setupDatabase();
+  }
 
   const app = express();
   // Compressão gzip/brotli das respostas (HTML, JS, CSS, JSON): páginas mais rápidas
   app.use(compression());
   // Atrás de 1 proxy (Cloud Run / load balancer): req.ip passa a ser o IP real do visitante
   app.set('trust proxy', 1);
+
+  if (REDIRECT_TO_ORIGIN) {
+    const redirectStatus = Number(process.env.REDIRECT_STATUS || 302);
+    app.use((req, res) => res.redirect(redirectStatus, REDIRECT_TO_ORIGIN + req.originalUrl));
+  }
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
