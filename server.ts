@@ -1441,6 +1441,65 @@ async function startServer() {
     }
   });
 
+  // Rota POST: Esqueci a senha. Troca a senha com o código do aplicativo ou um código de recuperação,
+  // sem e-mail. Só vale para quem já ativou o 2FA. Derruba todas as sessões abertas.
+  app.post('/api/admin/reset-password', limitAdmin, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      if (req.get(ADMIN_CSRF_HEADER) !== '1') {
+        return res.status(403).json({ success: false, message: 'Requisição recusada.' });
+      }
+      if (!ADMIN_LOGIN_ENABLED || !db) {
+        return res.status(503).json({ success: false, message: 'Login do painel indisponível.' });
+      }
+      const ip = req.ip || 'desconhecido';
+      if (tooManyLoginFailures(ip)) {
+        return res.status(429).json({ success: false, message: 'Muitas tentativas. Aguarde 15 minutos.' });
+      }
+
+      const usuario = clip(req.body?.usuario, 60);
+      const codigo = clip(req.body?.codigo, 20);
+      const novaSenha = typeof req.body?.novaSenha === 'string' ? req.body.novaSenha : '';
+      if (!usuario || !codigo || !novaSenha) {
+        return res.status(400).json({ success: false, message: 'Preencha o usuário, o código e a nova senha.' });
+      }
+      const policyError = passwordPolicyError(novaSenha, usuario);
+      if (policyError) return res.status(400).json({ success: false, message: policyError });
+
+      const row = getAdminRow(usuario);
+      if (row && row.bloqueadoAte > Date.now()) {
+        logAdminEvent(req, usuario, 'redefinição de senha bloqueada', false);
+        saveDbSoon();
+        return res.status(429).json({ success: false, message: 'Acesso bloqueado temporariamente por excesso de tentativas. Tente mais tarde.' });
+      }
+
+      // Mesma resposta para usuário inexistente, sem 2FA ou código errado: não revela qual falhou
+      const secret = row?.totpAtivo && row.totpSecret ? decryptSecret(row.totpSecret, SIGNING_SECRET) : null;
+      const step = secret ? verifyTotp(secret, codigo, row!.totpUltimoPasso) : null;
+      const hash = hashRecoveryCode(codigo);
+      const isRecovery = !!secret && step === null && /^[A-F0-9]{5}-?[A-F0-9]{5}$/i.test(codigo) && row!.recuperacao.includes(hash);
+      if (!row || !secret || (step === null && !isRecovery)) {
+        registerLoginFailure(ip, row);
+        logAdminEvent(req, usuario, 'redefinição de senha: código incorreto', false);
+        saveDbSoon();
+        return res.status(401).json({ success: false, message: 'Usuário ou código incorretos.' });
+      }
+
+      const recuperacao = isRecovery ? row.recuperacao.filter((h) => h !== hash) : row.recuperacao;
+      db.run(
+        `UPDATE admin_auth SET senha = ?, totp_ultimo_passo = COALESCE(?, totp_ultimo_passo), recuperacao = ?, falhas_login = 0, bloqueado_ate = 0, sessao_versao = sessao_versao + 1, data_modificacao = CURRENT_TIMESTAMP WHERE id = ?`,
+        [hashPassword(novaSenha), step, JSON.stringify(recuperacao), row.id]
+      );
+      logAdminEvent(req, row.usuario, isRecovery ? 'senha redefinida com código de recuperação' : 'senha redefinida com 2FA', true);
+      saveDbNow();
+      loginFailuresByIp.delete(ip);
+      return res.json({ success: true, message: 'Senha redefinida. Entre com a nova senha.' });
+    } catch (err: any) {
+      console.error('Erro ao redefinir senha admin:', err);
+      return res.status(500).json({ success: false, message: 'Erro ao redefinir senha.' });
+    }
+  });
+
   // Rota GET: Sessão atual do painel (usuário, códigos de recuperação restantes)
   app.get('/api/admin/session', limitAdmin, requireAdmin, (req, res) => {
     const row = getAdminRow((req as any).adminUser);

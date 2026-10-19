@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, ArrowLeft, Check, Copy, Download, KeyRound, Lock, RefreshCw, ShieldCheck, Smartphone } from 'lucide-react';
-import { loginAdmin, verifyAdminCode } from '../utils/adminAuth';
+import { loginAdmin, resetAdminPassword, verifyAdminCode } from '../utils/adminAuth';
 import { PhoenixLogo } from './PhoenixLogo';
 
 interface AdminLoginProps {
@@ -10,6 +10,7 @@ interface AdminLoginProps {
 
 type Stage =
   | { kind: 'password' }
+  | { kind: 'forgot' }
   | { kind: 'code'; mfaToken: string }
   | { kind: 'enroll'; mfaToken: string; qr: string; secret: string }
   | { kind: 'recovery'; usuario: string; codes: string[] };
@@ -48,6 +49,8 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onAuthenticated, onNavig
   const [codigo, setCodigo] = useState('');
   const [useRecovery, setUseRecovery] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [novaSenha, setNovaSenha] = useState('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [savedCodes, setSavedCodes] = useState(false);
@@ -66,6 +69,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onAuthenticated, onNavig
   const handlePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setNotice(null);
     if (!usuario.trim() || !senha) return setError('Informe usuário e senha.');
     setBusy(true);
     const result = await loginAdmin(usuario.trim(), senha);
@@ -94,6 +98,30 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onAuthenticated, onNavig
       return;
     }
     onAuthenticated(result.usuario);
+  };
+
+  const handleForgot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!usuario.trim() || !codigo.trim() || !novaSenha) return setError('Preencha o usuário, o código e a nova senha.');
+    setBusy(true);
+    const result = await resetAdminPassword(usuario.trim(), codigo.trim(), novaSenha);
+    setBusy(false);
+    setCodigo('');
+    if ('error' in result) return setError(result.error);
+    setNovaSenha('');
+    setUseRecovery(false);
+    setNotice(result.message);
+    setStage({ kind: 'password' });
+  };
+
+  const goTo = (next: Stage) => {
+    setError(null);
+    setNotice(null);
+    setCodigo('');
+    setNovaSenha('');
+    setUseRecovery(false);
+    setStage(next);
   };
 
   const downloadCodes = (codes: string[]) => {
@@ -177,13 +205,21 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onAuthenticated, onNavig
                 <PhoenixLogo variant="horizontal" size="sm" />
               </div>
               <h1 className="text-xl font-black tracking-tight">Painel do Lojista</h1>
-              {stage.kind !== 'recovery' && <Steps current={stage.kind === 'password' ? 1 : 2} />}
+              {stage.kind === 'forgot' && <p className="text-xs text-slate-300">Redefinir senha</p>}
+              {stage.kind !== 'recovery' && stage.kind !== 'forgot' && <Steps current={stage.kind === 'password' ? 1 : 2} />}
             </div>
 
             {error && (
               <div role="alert" className="flex items-start gap-2 p-3 rounded-xl bg-red-500/10 border border-red-400/30 text-red-200 text-xs">
                 <AlertCircle className="w-4 h-4 shrink-0 mt-px" />
                 <span>{error}</span>
+              </div>
+            )}
+
+            {notice && (
+              <div role="status" className="flex items-start gap-2 p-3 rounded-xl bg-emerald-500/10 border border-emerald-400/30 text-emerald-200 text-xs">
+                <Check className="w-4 h-4 shrink-0 mt-px" />
+                <span>{notice}</span>
               </div>
             )}
 
@@ -228,6 +264,96 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({ onAuthenticated, onNavig
                 >
                   {busy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
                   <span>{busy ? 'Validando...' : 'Continuar'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goTo({ kind: 'forgot' })}
+                  className="w-full text-xs text-slate-400 hover:text-white underline-offset-4 hover:underline cursor-pointer"
+                >
+                  Esqueci a senha
+                </button>
+              </form>
+            )}
+
+            {stage.kind === 'forgot' && (
+              <form onSubmit={handleForgot} className="space-y-4">
+                <p className="text-xs text-slate-300">
+                  Use o código do aplicativo autenticador ou um código de recuperação para criar uma senha nova. Só funciona depois que a verificação em duas etapas foi ativada.
+                </p>
+                <div>
+                  <label htmlFor="reset-usuario" className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                    Usuário
+                  </label>
+                  <input
+                    id="reset-usuario"
+                    value={usuario}
+                    onChange={(e) => setUsuario(e.target.value)}
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    required
+                    maxLength={60}
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="reset-codigo" className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                    {useRecovery ? 'Código de recuperação' : 'Código de 6 dígitos do aplicativo'}
+                  </label>
+                  <input
+                    id="reset-codigo"
+                    value={codigo}
+                    onChange={(e) => setCodigo(useRecovery ? e.target.value.toUpperCase().slice(0, 11) : e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    inputMode={useRecovery ? 'text' : 'numeric'}
+                    autoComplete="one-time-code"
+                    placeholder={useRecovery ? 'XXXXX-XXXXX' : '000000'}
+                    className={`${inputClass} text-center font-mono tracking-[0.5em] text-lg`}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUseRecovery((v) => !v);
+                      setCodigo('');
+                    }}
+                    className="mt-1.5 text-[11px] text-slate-400 hover:text-white underline-offset-4 hover:underline cursor-pointer"
+                  >
+                    {useRecovery ? 'Usar o código do aplicativo' : 'Perdi o celular: usar código de recuperação'}
+                  </button>
+                </div>
+                <div>
+                  <label htmlFor="reset-nova" className="block text-xs font-bold uppercase tracking-wider text-slate-300 mb-1.5">
+                    Nova senha
+                  </label>
+                  <input
+                    id="reset-nova"
+                    type="password"
+                    value={novaSenha}
+                    onChange={(e) => setNovaSenha(e.target.value)}
+                    autoComplete="new-password"
+                    required
+                    minLength={12}
+                    maxLength={128}
+                    className={inputClass}
+                  />
+                  <p className="mt-1.5 text-[11px] text-slate-400">
+                    Mínimo 12 caracteres, com 3 destes: minúscula, maiúscula, número e símbolo. Sem o nome de usuário.
+                  </p>
+                </div>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="w-full inline-flex items-center justify-center gap-2 bg-yellow-400 hover:bg-yellow-300 text-[#00224d] font-extrabold text-sm py-3 rounded-xl transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  {busy ? <RefreshCw className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                  <span>{busy ? 'Salvando...' : 'Redefinir senha'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goTo({ kind: 'password' })}
+                  className="w-full text-xs text-slate-400 hover:text-white underline-offset-4 hover:underline cursor-pointer"
+                >
+                  Voltar ao login
                 </button>
               </form>
             )}

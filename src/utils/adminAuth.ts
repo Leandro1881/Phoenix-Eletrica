@@ -66,6 +66,13 @@ export const verifyAdminCode = async (
   return { error: data.message || 'Código incorreto.', restart: !!data.restart };
 };
 
+// Esqueci a senha: usuário + código do aplicativo (ou de recuperação) + nova senha
+export const resetAdminPassword = async (usuario: string, codigo: string, novaSenha: string): Promise<{ message: string } | { error: string }> => {
+  const { ok, data } = await postJson('/api/admin/reset-password', { usuario, codigo, novaSenha });
+  if (ok && data.success) return { message: data.message || 'Senha redefinida.' };
+  return { error: data.message || 'Não foi possível redefinir a senha.' };
+};
+
 // Sessão ativa? Devolve o usuário ou null
 export const fetchAdminSession = async (): Promise<{ usuario: string; codigosRecuperacao: number } | null> => {
   try {
