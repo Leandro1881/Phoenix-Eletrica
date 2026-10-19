@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import compression from 'compression';
+import helmet from 'helmet';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -61,6 +62,81 @@ function checkChatRateLimit(ip: string): string | null {
 }
 
 // =========================================================================
+// Limite de requisições por IP nas rotas públicas que gravam dados
+// (cada gravação regrava o banco inteiro no bucket, então abuso custa caro)
+// =========================================================================
+const rateLimitBuckets = new Map<string, number[]>();
+
+function rateLimit(name: string, windowMs: number, max: number, message: string) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const key = `${name}:${req.ip || 'desconhecido'}`;
+    const now = Date.now();
+    const recent = (rateLimitBuckets.get(key) || []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) {
+      rateLimitBuckets.set(key, recent);
+      res.setHeader('Retry-After', String(Math.ceil(windowMs / 1000)));
+      return res.status(429).json({ status: 'error', message });
+    }
+    recent.push(now);
+    rateLimitBuckets.set(key, recent);
+    next();
+  };
+}
+
+// Limpa IPs sem acesso recente para o mapa não crescer sem fim
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, times] of rateLimitBuckets) {
+    if (!times.length || now - times[times.length - 1] > 60 * 60 * 1000) rateLimitBuckets.delete(key);
+  }
+}, 10 * 60 * 1000).unref();
+
+const TOO_MANY = 'Muitas tentativas em pouco tempo. Aguarde alguns minutos e tente novamente.';
+const limitUpload = rateLimit('upload', 10 * 60 * 1000, 10, TOO_MANY);
+const limitOrcamento = rateLimit('orcamento', 10 * 60 * 1000, 5, TOO_MANY);
+const limitLead = rateLimit('lead', 10 * 60 * 1000, 10, TOO_MANY);
+const limitEvento = rateLimit('evento', 10 * 60 * 1000, 60, TOO_MANY);
+
+// Corta o texto no tamanho máximo do campo
+const clip = (value: unknown, max: number) => String(value ?? '').trim().substring(0, max);
+
+// =========================================================================
+// Gravação do banco no disco (bucket montado)
+// =========================================================================
+let dbSaveTimer: NodeJS.Timeout | null = null;
+
+function saveDbNow() {
+  if (dbSaveTimer) {
+    clearTimeout(dbSaveTimer);
+    dbSaveTimer = null;
+  }
+  if (db) fs.writeFileSync(DB_PATH, Buffer.from(db.export()));
+}
+
+// Visitas e cliques: agrupa as gravações (no máximo 1 a cada 30 s) em vez de regravar o banco a cada acesso
+function saveDbSoon() {
+  if (dbSaveTimer) return;
+  dbSaveTimer = setTimeout(() => {
+    dbSaveTimer = null;
+    try {
+      saveDbNow();
+    } catch (err) {
+      console.error('Erro ao gravar banco:', err);
+    }
+  }, 30 * 1000);
+}
+
+// Cloud Run avisa com SIGTERM antes de desligar a instância: grava o que estiver pendente
+process.on('SIGTERM', () => {
+  try {
+    if (dbSaveTimer) saveDbNow();
+  } catch (err) {
+    console.error('Erro ao gravar banco no desligamento:', err);
+  }
+  process.exit(0);
+});
+
+// =========================================================================
 // Upload de anexos (Google Cloud Storage quando GCS_BUCKET está definido)
 // =========================================================================
 const UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
@@ -79,6 +155,15 @@ const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp'
 };
+
+// Link de anexo aceito no orçamento: só arquivos enviados pelo próprio /api/upload
+// (impede gravar links externos maliciosos que o lojista abriria pelo painel)
+function isAllowedArquivoUrl(url: string): boolean {
+  const bucketName = process.env.GCS_BUCKET || 'phoenix-eletrica-anexos';
+  if (url.startsWith(`https://storage.googleapis.com/${bucketName}/orcamentos/orcamento-`)) return true;
+  // Desenvolvimento sem bucket: arquivo salvo na pasta local /uploads
+  return process.env.NODE_ENV !== 'production' && /^https?:\/\/[^/]+\/uploads\/orcamento-[\w.-]+$/.test(url);
+}
 
 let storageClient: Storage | null = null;
 function getStorage(): Storage {
@@ -476,6 +561,36 @@ async function startServer() {
   app.use(compression());
   // Atrás de 1 proxy (Cloud Run / load balancer): req.ip passa a ser o IP real do visitante
   app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+
+  // Cabeçalhos de segurança. A CSP só vale em produção (o Vite de desenvolvimento usa scripts inline)
+  const isProduction = process.env.NODE_ENV === 'production';
+  app.use(helmet({
+    contentSecurityPolicy: isProduction ? {
+      useDefaults: false,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", 'https://challenges.cloudflare.com'],
+        styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+        fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https://images.unsplash.com', 'https://storage.googleapis.com', 'https://*.googleusercontent.com'],
+        connectSrc: ["'self'", 'https://rl4eobl3ypivmz3vzx6npkj6e40ldowj.lambda-url.us-east-2.on.aws', 'https://challenges.cloudflare.com'],
+        frameSrc: ['https://challenges.cloudflare.com'],
+        frameAncestors: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"]
+      }
+    } : false,
+    // HSTS de 1 ano só no domínio principal (sem includeSubDomains: outros subdomínios podem não ter HTTPS)
+    strictTransportSecurity: isProduction ? { maxAge: 31536000, includeSubDomains: false } : false,
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+    frameguard: { action: 'sameorigin' },
+    // Imagens como og-image.png precisam abrir em outros sites (WhatsApp, Facebook)
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    // Popups de WhatsApp abertos pelo site continuam funcionando
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }
+  }));
 
   if (REDIRECT_TO_ORIGIN) {
     const redirectStatus = Number(process.env.REDIRECT_STATUS || 302);
@@ -493,8 +608,11 @@ async function startServer() {
     });
   }
 
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  // Corpo das requisições: 100kb em geral; só o upload aceita o arquivo em base64 (15MB viram ~20MB)
+  const jsonSmall = express.json({ limit: '100kb' });
+  const jsonUpload = express.json({ limit: '21mb' });
+  app.use((req, res, next) => (req.path === '/api/upload' ? jsonUpload : jsonSmall)(req, res, next));
+  app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
   // Diretório de Uploads para Anexos de Orçamentos (PDF, Word, Excel, etc.)
   const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
@@ -526,9 +644,11 @@ async function startServer() {
   });
 
   // Rota POST: Upload de Arquivo de Orçamento (PDF, Word, etc.)
-  app.post('/api/upload', async (req, res) => {
+  app.post('/api/upload', limitUpload, async (req, res) => {
     try {
-      const { fileName, fileBase64, fileSize } = req.body;
+      const { fileBase64 } = req.body;
+      const fileName = clip(req.body.fileName, 200);
+      const fileSize = clip(req.body.fileSize, 30);
 
       if (!fileName || !fileBase64) {
         return res.status(400).json({
@@ -595,8 +715,7 @@ async function startServer() {
       console.error('Erro no upload de arquivo:', err);
       return res.status(500).json({
         status: 'error',
-        message: 'Falha ao processar o upload do arquivo',
-        detail: err.message
+        message: 'Falha ao processar o upload do arquivo'
       });
     }
   });
@@ -1049,19 +1168,18 @@ async function startServer() {
       console.error('Erro na rota /api/chat-assistant:', err);
       return res.status(500).json({
         status: 'error',
-        message: 'Erro interno ao processar conversa com o assistente.',
-        detail: err.message
+        message: 'Erro interno ao processar conversa com o assistente.'
       });
     }
   });
 
   // Rota POST: Integração e Proxy com AWS Lambda para captação de leads (Resolve problemas de CORS no navegador)
-  app.post('/api/lambda-lead', async (req, res) => {
+  app.post('/api/lambda-lead', limitLead, async (req, res) => {
     try {
       const { nome, email, token } = req.body;
-      const cleanNome = String(nome || '').trim();
-      const cleanEmail = String(email || '').trim();
-      const cleanToken = String(token || '').trim();
+      const cleanNome = clip(nome, 120);
+      const cleanEmail = clip(email, 160);
+      const cleanToken = clip(token, 4096);
 
       if (!cleanNome || !cleanEmail) {
         return res.status(400).json({
@@ -1120,38 +1238,41 @@ async function startServer() {
         return res.status(lambdaResponse.status).json({
           status: 'error',
           message: 'Erro retornado pela AWS Lambda',
-          detail: lambdaData
+          // Só a mensagem amigável da Lambda segue para o navegador
+          detail: typeof lambdaData?.mensagem === 'string' ? { mensagem: lambdaData.mensagem.substring(0, 300) } : undefined
         });
       }
 
       console.log(`✓ [AWS Lambda Proxy] Lead enviado com sucesso para ${cleanEmail}:`, lambdaData);
       return res.status(200).json({
         status: 'success',
-        message: 'Lead enviado com sucesso para AWS Lambda',
-        data: lambdaData
+        message: 'Lead enviado com sucesso para AWS Lambda'
       });
     } catch (err: any) {
       console.error('Erro no proxy AWS Lambda:', err);
       return res.status(500).json({
         status: 'error',
-        message: 'Falha na conexão com a AWS Lambda.',
-        detail: err.message
+        message: 'Falha na conexão com a AWS Lambda.'
       });
     }
   });
 
   // Rota POST: Inserir novo orçamento (Lead com verificação LGPD e suporte a anexo)
-  app.post('/api/orcamentos', (req, res) => {
+  app.post('/api/orcamentos', limitOrcamento, (req, res) => {
     try {
       const { nome, email, telefone, cidade, materiais, aceita_marketing, arquivo_nome, arquivo_tamanho, arquivo_url } = req.body;
 
-      const cleanNome = String(nome || '').trim();
-      const cleanTelefone = String(telefone || '').trim();
-      const cleanCidade = String(cidade || '').trim();
-      const cleanArquivoNome = String(arquivo_nome || '').trim();
-      const cleanArquivoTamanho = String(arquivo_tamanho || '').trim();
-      const cleanArquivoUrl = String(arquivo_url || '').trim();
-      let cleanMateriais = String(materiais || '').trim();
+      const cleanNome = clip(nome, 120);
+      const cleanTelefone = clip(telefone, 30);
+      const cleanCidade = clip(cidade, 100);
+      const cleanArquivoNome = clip(arquivo_nome, 200);
+      const cleanArquivoTamanho = clip(arquivo_tamanho, 30);
+      const rawArquivoUrl = clip(arquivo_url, 500);
+      const cleanArquivoUrl = rawArquivoUrl && isAllowedArquivoUrl(rawArquivoUrl) ? rawArquivoUrl : '';
+      if (rawArquivoUrl && !cleanArquivoUrl) {
+        console.warn('[ORÇAMENTO] Link de anexo recusado (fora do bucket de anexos):', rawArquivoUrl);
+      }
+      let cleanMateriais = clip(materiais, 10000);
 
       if (!cleanMateriais && cleanArquivoNome) {
         cleanMateriais = `[Arquivo em Anexo: ${cleanArquivoNome}]`;
@@ -1166,7 +1287,7 @@ async function startServer() {
 
       // Converte consentimento explícito LGPD para 1 (True) ou 0 (False)
       const optInMarketing = (aceita_marketing === true || aceita_marketing === 1 || aceita_marketing === '1') ? 1 : 0;
-      const cleanEmail = String(email || '').trim();
+      const cleanEmail = clip(email, 160);
 
       const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
@@ -1190,12 +1311,11 @@ async function startServer() {
           }
         }
 
-        // Salva as alterações no arquivo SQLite físico
-        const data = db.export();
-        fs.writeFileSync(DB_PATH, Buffer.from(data));
-
-        // Obtém o último ID inserido
+        // Obtém o último ID inserido (antes de exportar: export pode zerar last_insert_rowid)
         const result = db.exec('SELECT last_insert_rowid() as id');
+
+        // Orçamento é dado importante: grava no arquivo SQLite na hora
+        saveDbNow();
         const leadId = result[0]?.values[0]?.[0] || Date.now();
 
         console.log(`[NOVO ORÇAMENTO REGISTRADO] ID: ${leadId} - Cliente: ${cleanNome} - Tel: ${cleanTelefone} - Anexo: ${cleanArquivoNome || 'Nenhum'} - URL: ${cleanArquivoUrl || 'Nenhum'}`);
@@ -1229,8 +1349,7 @@ async function startServer() {
       console.error('Erro ao registrar orçamento:', err);
       return res.status(500).json({
         status: 'error',
-        message: 'Erro interno ao salvar no banco de dados',
-        detail: err.message
+        message: 'Erro interno ao salvar no banco de dados'
       });
     }
   });
@@ -1277,7 +1396,7 @@ async function startServer() {
       return res.json({ total: leads.length, leads });
     } catch (err: any) {
       console.error('Erro ao consultar leads:', err);
-      return res.status(500).json({ status: 'error', message: err.message });
+      return res.status(500).json({ status: 'error', message: 'Erro interno no servidor.' });
     }
   });
 
@@ -1395,7 +1514,7 @@ async function startServer() {
   });
 
   // Rota POST: Registrar clique no botão do WhatsApp em qualquer ponto do site
-  app.post('/api/eventos/clique-whatsapp', (req, res) => {
+  app.post('/api/eventos/clique-whatsapp', limitEvento, (req, res) => {
     try {
       const { origem, rotulo } = req.body || {};
       const origemBotao = String(origem || 'Botão Flutuante (WhatsApp)').substring(0, 100);
@@ -1407,8 +1526,7 @@ async function startServer() {
           `INSERT INTO cliques_whatsapp (origem_botao, rotulo, data_hora) VALUES (?, ?, ?)`,
           [origemBotao, rotuloFinal, now]
         );
-        const data = db.export();
-        fs.writeFileSync(DB_PATH, Buffer.from(data));
+        saveDbSoon();
       }
 
       return res.status(200).json({ success: true, timestamp: now });
@@ -1589,12 +1707,12 @@ async function startServer() {
       });
     } catch (err: any) {
       console.error('Erro no dashboard executivo:', err);
-      return res.status(500).json({ error: 'Erro ao gerar métricas do dashboard', details: err.message });
+      return res.status(500).json({ error: 'Erro ao gerar métricas do dashboard' });
     }
   });
 
   // Rota POST: Registrar novo acesso/visita ao site (chamado silenciosamente no carregamento da página)
-  app.post('/api/visitas', (req, res) => {
+  app.post('/api/visitas', limitEvento, (req, res) => {
     try {
       const userAgent = req.headers['user-agent'] || 'Desconhecido';
       const isMobile = /mobile|iphone|ipad|android/i.test(userAgent);
@@ -1607,7 +1725,7 @@ async function startServer() {
       else if (/edg/i.test(userAgent)) navegador = 'Edge';
 
       const origem = req.body?.origem || req.headers.referer || 'Acesso Direto';
-      const pagina = req.body?.pagina || '/';
+      const pagina = clip(req.body?.pagina || '/', 200);
       const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
 
       if (db) {
@@ -1616,9 +1734,8 @@ async function startServer() {
           [now, dispositivo, navegador, String(origem).substring(0, 150), pagina]
         );
 
-        // Salva periodicamente no disco SQLite
-        const data = db.export();
-        fs.writeFileSync(DB_PATH, Buffer.from(data));
+        // Gravação agrupada no disco SQLite (no máximo 1 a cada 30 s)
+        saveDbSoon();
       }
 
       return res.status(200).json({ status: 'ok', time: now });
@@ -1676,7 +1793,7 @@ async function startServer() {
       });
     } catch (err: any) {
       console.error('Erro ao consultar estatísticas de visitas:', err);
-      return res.status(500).json({ status: 'error', message: err.message });
+      return res.status(500).json({ status: 'error', message: 'Erro interno no servidor.' });
     }
   });
 
@@ -1730,7 +1847,7 @@ async function startServer() {
       });
     } catch (err: any) {
       console.error('Erro ao consultar avaliações do Google:', err);
-      return res.status(500).json({ status: 'error', message: err.message });
+      return res.status(500).json({ status: 'error', message: 'Erro interno no servidor.' });
     }
   });
 
@@ -1779,7 +1896,7 @@ async function startServer() {
       return res.status(500).json({ status: 'error', message: 'Banco indisponível' });
     } catch (err: any) {
       console.error('Erro ao salvar avaliação:', err);
-      return res.status(500).json({ status: 'error', message: err.message });
+      return res.status(500).json({ status: 'error', message: 'Erro interno no servidor.' });
     }
   });
 
