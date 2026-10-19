@@ -5,35 +5,36 @@ import {
   Download, Search, CheckCircle2, AlertCircle, ArrowLeft, BarChart3,
   Home, Paperclip
 } from 'lucide-react';
-import { adminFetch, ADMIN_LOGOUT_EVENT, clearAdminSession, getAdminToken, getAdminUser, loginAdmin } from '../utils/adminAuth';
+import { adminFetch, ADMIN_LOGOUT_EVENT, fetchAdminSession, logoutAdmin } from '../utils/adminAuth';
 import { Lead, VisitasStats, ExecutiveDashboardData } from '../types';
 import { AdminDashboard } from './AdminDashboard';
-import { LeadsModal } from './LeadsModal';
-import { PhoenixLogo } from './PhoenixLogo';
+import { AdminLogin } from './AdminLogin';
+import { AdminSecurity } from './AdminSecurity';
 
+
+// Link de anexo só abre se for do armazenamento de anexos ou da própria loja (nunca javascript: ou site externo)
+const safeFileUrl = (url?: string | null): string | undefined => {
+  if (!url) return undefined;
+  if (/^https:\/\/storage\.googleapis\.com\/[\w.-]+\/orcamentos\//.test(url)) return url;
+  if (url.startsWith(window.location.origin + '/uploads/')) return url;
+  return undefined;
+};
 
 interface AdminPageProps {
   onNavigateHome: () => void;
 }
 
 export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
-  // Sessão validada pelo servidor (token em sessionStorage)
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => !!getAdminToken());
-  const [adminUser, setAdminUser] = useState<string>(() => getAdminUser() || 'admin');
-  const [isLeadsModalOpen, setIsLeadsModalOpen] = useState<boolean>(false);
+  // Sessão em cookie HttpOnly validada pelo servidor; null enquanto confere
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [adminUser, setAdminUser] = useState<string>('');
 
-  // Formulário de Login
-  const [loginUser, setLoginUser] = useState<string>('admin');
-  const [loginPass, setLoginPass] = useState<string>('');
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
-
-  // Estados de Troca de Senha
-  const [senhaAtual, setSenhaAtual] = useState<string>('');
-  const [novaSenha, setNovaSenha] = useState<string>('');
-  const [novaSenhaConfirm, setNovaSenhaConfirm] = useState<string>('');
-  const [passFeedback, setPassFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-  const [isChangingPass, setIsChangingPass] = useState<boolean>(false);
+  useEffect(() => {
+    fetchAdminSession().then((session) => {
+      setIsAuthenticated(!!session);
+      if (session) setAdminUser(session.usuario);
+    });
+  }, []);
 
   // Estados do Painel
   const [activeTab, setActiveTab] = useState<'dashboard' | 'leads' | 'visitas' | 'seguranca'>('dashboard');
@@ -83,37 +84,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     }
   }, [isAuthenticated]);
 
-  // Login validado no servidor
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoginError(null);
-
-    const inputUser = loginUser.trim();
-    const inputPass = loginPass.trim();
-
-    if (!inputUser || !inputPass) {
-      setLoginError('Por favor, informe seu usuário e sua senha.');
-      return;
-    }
-
-    setIsLoggingIn(true);
-    const result = await loginAdmin(inputUser, inputPass);
-    setIsLoggingIn(false);
-    if ('error' in result) {
-      setLoginError(result.error);
-      return;
-    }
-    setIsAuthenticated(true);
-    setAdminUser(result.usuario);
-    setLoginPass('');
-  };
-
-  // Handler de Logout
-  const handleLogout = () => {
-    clearAdminSession();
+  const handleLogout = async () => {
+    await logoutAdmin();
     setIsAuthenticated(false);
-    setLoginPass('');
-    setLoginError(null);
   };
 
   // Sessão expirada em qualquer requisição: volta para a tela de login
@@ -123,56 +96,12 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     return () => window.removeEventListener(ADMIN_LOGOUT_EVENT, onLogout);
   }, []);
 
-  // Handler de Troca de Senha
-  const handleChangePassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPassFeedback(null);
-
-    if (!senhaAtual || !novaSenha || !novaSenhaConfirm) {
-      setPassFeedback({ type: 'error', message: 'Preencha todos os campos do formulário.' });
-      return;
-    }
-
-    if (novaSenha !== novaSenhaConfirm) {
-      setPassFeedback({ type: 'error', message: 'A nova senha e a confirmação não conferem.' });
-      return;
-    }
-
-    if (novaSenha.length < 10) {
-      setPassFeedback({ type: 'error', message: 'A nova senha deve ter no mínimo 10 caracteres.' });
-      return;
-    }
-
-    setIsChangingPass(true);
-    try {
-      const res = await adminFetch('/api/admin/change-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ senhaAtual, novaSenha })
-      });
-
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setPassFeedback({ type: 'success', message: 'Senha atualizada com sucesso no banco de dados e no sistema!' });
-        setSenhaAtual('');
-        setNovaSenha('');
-        setNovaSenhaConfirm('');
-      } else {
-        setPassFeedback({ type: 'error', message: data.message || 'Falha ao alterar senha no servidor.' });
-      }
-    } catch (err: any) {
-      setPassFeedback({ type: 'error', message: 'Erro ao conectar ao servidor. A senha não foi alterada.' });
-    } finally {
-      setIsChangingPass(false);
-    }
-  };
-
   // Excluir Lead
   const handleDeleteLead = async (id: number) => {
     if (!window.confirm(`Deseja realmente excluir o lead #${id}?`)) return;
 
     try {
-      const res = await adminFetch(`/api/orcamentos/${id}`, { method: 'DELETE' });
+      const res = await adminFetch(`/api/orcamentos/${id}`, { method: 'DELETE', body: '{}' });
       if (res.ok) {
         setLeads((prev) => prev.filter((l) => l.id !== id));
         fetchAllData();
@@ -189,15 +118,21 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
       return;
     }
 
+    // Célula começando com = + - @ vira fórmula no Excel: prefixa com apóstrofo (CSV injection)
+    const cell = (value: unknown) => {
+      let v = String(value ?? '');
+      if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+      return '"' + v.replace(/"/g, '""') + '"';
+    };
     const headers = ['ID', 'Data/Hora', 'Cliente', 'Telefone', 'Cidade', 'Materiais Solicitados', 'Opt-in Marketing (LGPD)'];
     const rows = leads.map((l) => [
       l.id,
-      `"${l.data_solicitacao}"`,
-      `"${l.nome.replace(/"/g, '""')}"`,
-      `"${l.telefone}"`,
-      `"${l.cidade.replace(/"/g, '""')}"`,
-      `"${l.materiais.replace(/"/g, '""')}"`,
-      l.aceita_marketing === 1 || l.aceita_marketing === true ? '"Sim (Autorizado)"' : '"Não (Não Autorizado)"'
+      cell(l.data_solicitacao),
+      cell(l.nome),
+      cell(l.telefone),
+      cell(l.cidade),
+      cell(l.materiais),
+      cell(l.aceita_marketing === 1 || l.aceita_marketing === true ? 'Sim (Autorizado)' : 'Não (Não Autorizado)')
     ]);
 
     const csvContent = 'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
@@ -210,113 +145,19 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
     document.body.removeChild(link);
   };
 
-  // =========================================================================
-  // TELA 1: PÁGINA DE LOGIN EM /admin (QUANDO NÃO AUTENTICADO)
-  // =========================================================================
+  if (isAuthenticated === null) {
+    return <div className="min-h-screen bg-[#00122e]" aria-busy="true" />;
+  }
+
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-[#f0f4f9] flex flex-col justify-between items-center p-4">
-        
-        {/* Topo Limpo */}
-        <div className="w-full max-w-md pt-6 flex items-center justify-between">
-          <button
-            onClick={onNavigateHome}
-            className="inline-flex items-center gap-1.5 text-xs font-bold text-[#003882] hover:text-[#00224d] transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Voltar para a Loja</span>
-          </button>
-          <span className="text-[11px] font-mono text-slate-400">/admin</span>
-        </div>
-
-        {/* Card Central de Login */}
-        <div className="w-full max-w-md my-auto">
-          <div className="bg-white border border-slate-300 rounded-2xl shadow-xl overflow-hidden relative">
-            <div className="h-1.5 bg-gradient-to-r from-[#003882] via-[#004b9c] to-[#d31010]" />
-
-            <div className="p-6 sm:p-8 space-y-6">
-              
-              {/* Logo e Cabeçalho */}
-              <div className="text-center space-y-2">
-                <div className="w-14 h-14 rounded-2xl bg-blue-50 text-[#003882] border border-blue-200 flex items-center justify-center mx-auto shadow-2xs">
-                  <Lock className="w-7 h-7" />
-                </div>
-                <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-                  Painel do Lojista
-                </h1>
-                <p className="text-xs text-slate-500 max-w-xs mx-auto">
-                  Acesso executivo restrito aos administradores da <strong>Phoenix Elétrica</strong>.
-                </p>
-              </div>
-
-              {/* Alerta de Erro */}
-              {loginError && (
-                <div className="flex items-center gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs">
-                  <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
-                  <span>{loginError}</span>
-                </div>
-              )}
-
-              {/* Formulário de Login */}
-              <form onSubmit={handleLogin} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                    Usuário Master
-                  </label>
-                  <input
-                    type="text"
-                    value={loginUser}
-                    onChange={(e) => setLoginUser(e.target.value)}
-                    placeholder="admin"
-                    required
-                    autoFocus
-                    className="w-full bg-slate-50 focus:bg-white border border-slate-300 focus:border-[#004b9c] focus:ring-2 focus:ring-blue-100 rounded-lg px-3.5 py-2.5 text-xs sm:text-sm text-slate-900 outline-none transition-all"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
-                    Senha de Acesso
-                  </label>
-                  <input
-                    type="password"
-                    value={loginPass}
-                    onChange={(e) => setLoginPass(e.target.value)}
-                    placeholder="Digite sua senha"
-                    required
-                    className="w-full bg-slate-50 focus:bg-white border border-slate-300 focus:border-[#004b9c] focus:ring-2 focus:ring-blue-100 rounded-lg px-3.5 py-2.5 text-xs sm:text-sm text-slate-900 outline-none transition-all"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isLoggingIn}
-                  className="w-full inline-flex items-center justify-center gap-2 bg-[#004b9c] hover:bg-[#003882] text-white font-bold text-sm py-3 px-4 rounded-lg shadow-sm transition-all cursor-pointer disabled:opacity-50"
-                >
-                  {isLoggingIn ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Validando Acesso...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Key className="w-4 h-4" />
-                      <span>Entrar no Painel Executivo</span>
-                    </>
-                  )}
-                </button>
-              </form>
-
-            </div>
-          </div>
-        </div>
-
-        {/* Rodapé da Tela de Login */}
-        <div className="py-4 text-center text-xs text-slate-400">
-          © 2026 Phoenix Elétrica · Distribuidora de Materiais Elétricos
-        </div>
-
-      </div>
+      <AdminLogin
+        onNavigateHome={onNavigateHome}
+        onAuthenticated={(usuario) => {
+          setAdminUser(usuario);
+          setIsAuthenticated(true);
+        }}
+      />
     );
   }
 
@@ -333,7 +174,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
   });
 
   // =========================================================================
-  // TELA 2: PAINEL ADMINISTRATIVO COMPLETO (/admin AUTENTICADO)
+  // TELA 2: PAINEL ADMINISTRATIVO COMPLETO (AUTENTICADO)
   // =========================================================================
   return (
     <div className="min-h-screen bg-[#f1f5f9] text-slate-800 flex flex-col">
@@ -447,7 +288,7 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
               }`}
             >
               <ShieldCheck className="w-4 h-4 text-indigo-400" />
-              <span>Segurança & Senha Master</span>
+              <span>Segurança</span>
             </button>
 
           </div>
@@ -494,15 +335,6 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
               </div>
 
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setIsLeadsModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#003882] border border-blue-200 text-xs font-bold shadow-2xs transition-colors cursor-pointer"
-                  title="Abrir no modo LeadsModal"
-                >
-                  <Database className="w-3.5 h-3.5" />
-                  <span>Modo LeadsModal</span>
-                </button>
-
                 <button
                   onClick={handleExportCSV}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-2xs transition-colors cursor-pointer"
@@ -594,9 +426,9 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
                                   <Paperclip className="w-3 h-3 text-[#004b9c]" />
                                   <span>Anexo: {lead.arquivo_nome} {lead.arquivo_tamanho ? `(${lead.arquivo_tamanho})` : ''}</span>
                                 </span>
-                                {lead.arquivo_url && (
+                                {safeFileUrl(lead.arquivo_url) && (
                                   <a
-                                    href={lead.arquivo_url.replace('http://localhost:3000', typeof window !== 'undefined' ? window.location.origin : '')}
+                                    href={safeFileUrl(lead.arquivo_url)}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="inline-flex items-center gap-1 text-[11px] font-bold text-[#004b9c] hover:text-white hover:bg-[#004b9c] bg-white px-2 py-0.5 rounded border border-blue-300 transition-colors shadow-2xs"
@@ -679,87 +511,14 @@ export const AdminPage: React.FC<AdminPageProps> = ({ onNavigateHome }) => {
             ABA 4: SEGURANÇA & ALTERAR SENHA
             ========================================================================= */}
         {activeTab === 'seguranca' && (
-          <div className="max-w-lg mx-auto bg-white p-6 sm:p-8 rounded-xl border border-slate-200 shadow-2xs space-y-5">
-            <div className="flex items-center gap-3 border-b border-slate-200 pb-4">
-              <div className="w-12 h-12 rounded-xl bg-blue-50 text-[#003882] flex items-center justify-center">
-                <Key className="w-6 h-6" />
-              </div>
-              <div>
-                <h4 className="text-base font-extrabold text-slate-900">Alterar Senha do Administrador</h4>
-                <p className="text-xs text-slate-500">Altere a credencial master do usuário <strong className="text-slate-700">{adminUser}</strong>.</p>
-              </div>
-            </div>
-
-            {passFeedback && (
-              <div className={`p-3.5 rounded-lg text-xs flex items-center gap-2 ${
-                passFeedback.type === 'success' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-800 border border-red-200'
-              }`}>
-                {passFeedback.type === 'success' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
-                <span>{passFeedback.message}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleChangePassword} className="space-y-4 text-xs">
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Senha Atual:</label>
-                <input
-                  type="password"
-                  value={senhaAtual}
-                  onChange={(e) => setSenhaAtual(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:border-[#004b9c] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Nova Senha (Mínimo 6 dígitos):</label>
-                <input
-                  type="password"
-                  value={novaSenha}
-                  onChange={(e) => setNovaSenha(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:border-[#004b9c] outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Confirmar Nova Senha:</label>
-                <input
-                  type="password"
-                  value={novaSenhaConfirm}
-                  onChange={(e) => setNovaSenhaConfirm(e.target.value)}
-                  required
-                  className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-lg focus:bg-white focus:border-[#004b9c] outline-none"
-                />
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={isChangingPass}
-                  className="w-full py-3 px-4 bg-[#004b9c] hover:bg-[#003882] text-white font-bold rounded-lg shadow-sm transition-colors cursor-pointer"
-                >
-                  {isChangingPass ? 'Atualizando senha no banco SQLite...' : 'Salvar Nova Senha'}
-                </button>
-              </div>
-            </form>
-          </div>
+          <AdminSecurity adminUser={adminUser} onLoggedOut={() => setIsAuthenticated(false)} />
         )}
-
-        {/* LeadsModal: Renderizado exclusivamente após autenticação bem-sucedida */}
-        <LeadsModal
-          isOpen={isLeadsModalOpen}
-          onClose={() => {
-            setIsLeadsModalOpen(false);
-            fetchAllData();
-          }}
-        />
 
       </main>
 
       {/* Footer */}
       <footer className="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500">
-        Painel do Lojista · Phoenix Elétrica Distribuidora · Base de Dados SQLite
+        Painel do Lojista · Phoenix Elétrica · Acesso restrito e monitorado
       </footer>
 
     </div>

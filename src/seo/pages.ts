@@ -119,8 +119,9 @@ export const CATEGORY_PAGES: CategoryPage[] = [
   )
 ];
 
-const ADMIN: SeoPage = {
-  path: '/admin',
+// Painel do lojista: o endereço é secreto (ADMIN_PATH no servidor) e não aparece no código do site
+export const ADMIN_PAGE: SeoPage = {
+  path: '',
   title: 'Painel | Phoenix Elétrica',
   description: 'Área restrita.',
   noindex: true
@@ -144,7 +145,6 @@ const normalize = (pathname: string) => {
 // Página correspondente ao endereço; undefined quando o endereço não existe
 export const findPage = (pathname: string): SeoPage | undefined => {
   const p = normalize(pathname);
-  if (p === '/admin' || p.startsWith('/admin/')) return ADMIN;
   return PUBLIC_PAGES.find((page) => page.path === p);
 };
 

@@ -1,34 +1,10 @@
-import React, { useRef } from 'react';
+import React from 'react';
 import { MessageSquare, MapPin, Clock, Phone, Mail, ShieldCheck, FileText } from 'lucide-react';
 import { PhoenixLogo } from './PhoenixLogo';
 import { navCategories } from './Header';
 import { trackWhatsAppClick } from '../utils/analytics';
 
-interface FooterProps {
-  onSecretAdminTrigger?: () => void;
-}
-
-export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
-  const clickCountRef = useRef(0);
-  const clickTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Gatilho secreto: 3 cliques no rodapé abrem a tela de login administrativo
-  const handleSecretClick = () => {
-    clickCountRef.current += 1;
-    if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
-
-    if (clickCountRef.current >= 3) {
-      clickCountRef.current = 0;
-      if (onSecretAdminTrigger) {
-        onSecretAdminTrigger();
-      }
-    } else {
-      clickTimerRef.current = setTimeout(() => {
-        clickCountRef.current = 0;
-      }, 1200);
-    }
-  };
-
+export const Footer: React.FC = () => {
   return (
     <footer id="contato" className="bg-[#050f26] text-slate-400 text-sm">
       <div className="h-1 bg-gradient-to-r from-brand-blue via-brand-yellow to-brand-red" />
@@ -116,7 +92,7 @@ export const Footer: React.FC<FooterProps> = ({ onSecretAdminTrigger }) => {
 
         {/* Barra inferior (gatilho discreto por 3 cliques no copyright) */}
         <div className="mt-14 pt-6 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
-          <p onClick={handleSecretClick} className="cursor-default select-none">
+          <p>
             © 2026 Phoenix Elétrica. Todos os direitos reservados.
           </p>
           <p>CNPJ 45.128.940/0001-82</p>

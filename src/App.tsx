@@ -13,7 +13,8 @@ import { Footer } from './components/Footer';
 import { GoogleReviews } from './components/GoogleReviews';
 import { AiQuoteAssistant } from './components/AiQuoteAssistant';
 import { CategoryPage, OtherCategories } from './components/CategoryPage';
-import { findPage, findCategoryPage, NOT_FOUND, QUOTE_PAGE } from './seo/pages';
+import { NotFound } from './components/NotFound';
+import { findPage, findCategoryPage, NOT_FOUND, QUOTE_PAGE, ADMIN_PAGE } from './seo/pages';
 import { applyHead } from './seo/head';
 import { MessageSquare, Bot } from 'lucide-react';
 import { MotionConfig } from 'motion/react';
@@ -21,16 +22,16 @@ import { ReviewsData } from './types';
 import { trackWhatsAppClick } from './utils/analytics';
 
 // Painel do lojista: baixado só quando aberto, para não pesar no carregamento do site
-const LeadsModal = lazy(() => import('./components/LeadsModal').then((m) => ({ default: m.LeadsModal })));
 const AdminPage = lazy(() => import('./components/AdminPage').then((m) => ({ default: m.AdminPage })));
 
 // Página atual (cada página do site é um endereço próprio, carregado do servidor)
 const currentPage = findPage(window.location.pathname) ?? NOT_FOUND;
 const currentCategoryPage = findCategoryPage(window.location.pathname);
+// O servidor marca a página do painel (endereço secreto); não existe atalho nem endereço fixo no código
+const isPanelPage = document.querySelector('meta[name="phx-view"]')?.getAttribute('content') === 'panel';
 
 export default function App() {
   const [selectedMaterial, setSelectedMaterial] = useState<string>('');
-  const [isLeadsModalOpen, setIsLeadsModalOpen] = useState(false);
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
   const [reviewsData, setReviewsData] = useState<ReviewsData>({
     total: 16,
@@ -38,25 +39,15 @@ export default function App() {
     reviews: []
   });
 
-  // Estado de Rota Dedicada para /admin
-  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
-    return (
-      window.location.pathname === '/admin' ||
-      window.location.pathname.startsWith('/admin') ||
-      window.location.hash === '#/admin' ||
-      window.location.hash === '#admin-page'
-    );
-  });
-
   // Título, descrição e canonical da página atual
   useEffect(() => {
-    applyHead(isAdminRoute ? findPage('/admin')! : currentPage);
-  }, [isAdminRoute]);
+    applyHead(isPanelPage ? ADMIN_PAGE : currentPage);
+  }, []);
 
   // Links do tipo /#categorias vindos de outras páginas: rola até a seção após renderizar
   useEffect(() => {
     const id = window.location.hash.slice(1);
-    if (!id || id.includes('admin') || id === 'painel') return;
+    if (!id || isPanelPage) return;
     const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' }), 300);
     return () => clearTimeout(timer);
   }, []);
@@ -90,70 +81,8 @@ export default function App() {
     } catch (_) {}
   }, []);
 
-  // Monitora alterações de URL (navegação por rotas /admin e /)
-  useEffect(() => {
-    const handleLocationChange = () => {
-      const isAdm = (
-        window.location.pathname === '/admin' ||
-        window.location.pathname.startsWith('/admin') ||
-        window.location.hash === '#/admin' ||
-        window.location.hash === '#admin-page'
-      );
-      setIsAdminRoute(isAdm);
-    };
-
-    window.addEventListener('popstate', handleLocationChange);
-    window.addEventListener('hashchange', handleLocationChange);
-    return () => {
-      window.removeEventListener('popstate', handleLocationChange);
-      window.removeEventListener('hashchange', handleLocationChange);
-    };
-  }, []);
-
-  // Atalho secreto de teclado: Ctrl + Shift + A ou Alt + L
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        (e.altKey && (e.key === 'l' || e.key === 'L')) ||
-        (e.ctrlKey && e.shiftKey && (e.key === 'a' || e.key === 'A'))
-      ) {
-        e.preventDefault();
-        setIsLeadsModalOpen((prev) => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  // Verifica se o lojista acessou com ?admin=true ou #admin na URL
-  useEffect(() => {
-    const checkAdminUrl = () => {
-      if (window.location.search.includes('admin') || window.location.hash === '#admin' || window.location.hash === '#painel') {
-        setIsLeadsModalOpen(true);
-      }
-    };
-    checkAdminUrl();
-    window.addEventListener('hashchange', checkAdminUrl);
-    return () => window.removeEventListener('hashchange', checkAdminUrl);
-  }, []);
-
-  // Navegação suave entre a Loja e a Página /admin
-  const navigateToAdmin = () => {
-    history.pushState(null, '', '/admin');
-    setIsAdminRoute(true);
-    setIsLeadsModalOpen(false);
-  };
-
   const navigateToHome = () => {
-    history.pushState(null, '', '/');
-    setIsAdminRoute(false);
-  };
-
-  const handleCloseAdminModal = () => {
-    setIsLeadsModalOpen(false);
-    if (window.location.hash.includes('admin') || window.location.hash.includes('painel')) {
-      history.replaceState(null, '', window.location.pathname + window.location.search);
-    }
+    window.location.href = '/';
   };
 
   const handleScrollToQuote = () => {
@@ -177,8 +106,8 @@ export default function App() {
     setIsAiAssistantOpen(false);
   };
 
-  // Se a rota atual for /admin, renderiza a Página Dedicada do Administrador
-  if (isAdminRoute) {
+  // Página do painel: renderiza só o painel (login com 2FA)
+  if (isPanelPage) {
     return (
       <Suspense fallback={null}>
         <AdminPage onNavigateHome={navigateToHome} />
@@ -217,19 +146,7 @@ export default function App() {
             <GoogleReviews reviewsData={reviewsData} onReviewAdded={refreshReviews} />
           </>
         ) : currentPage === NOT_FOUND ? (
-          <section className="py-28 text-center px-4">
-            <span className="text-xs font-bold uppercase tracking-[0.2em] text-brand-red">Erro 404</span>
-            <h1 className="mt-2 text-3xl sm:text-4xl font-extrabold text-brand-navy tracking-tight">Página não encontrada</h1>
-            <p className="mt-3 text-slate-500">O endereço acessado não existe.</p>
-            <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
-              <a href="/" className="inline-flex items-center justify-center h-12 px-6 rounded-full bg-brand-navy text-white font-bold">
-                Ir para a página inicial
-              </a>
-              <a href="/cotacao" className="inline-flex items-center justify-center h-12 px-6 rounded-full bg-brand-yellow text-brand-navy font-bold">
-                Fazer uma cotação
-              </a>
-            </div>
-          </section>
+          <NotFound />
         ) : (
         <>
         {/* Hero Section: Foco em agilidade para obras e instalações */}
@@ -260,19 +177,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Footer limpo sem botões para clientes; gatilho secreto via 3 cliques no copyright */}
-      <Footer onSecretAdminTrigger={() => setIsLeadsModalOpen(true)} />
-
-      {/* Painel do Lojista Protegido com Login e Senha */}
-      {isLeadsModalOpen && (
-        <Suspense fallback={null}>
-          <LeadsModal
-            isOpen={isLeadsModalOpen}
-            onClose={handleCloseAdminModal}
-            onOpenFullScreen={navigateToAdmin}
-          />
-        </Suspense>
-      )}
+      <Footer />
 
       {/* Widget Flutuante do Assistente IA (Lado Esquerdo - Mantido montado para preservar histórico) */}
       <div 

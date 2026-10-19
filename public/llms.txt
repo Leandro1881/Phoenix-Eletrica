@@ -1,0 +1,31 @@
+# Phoenix Elétrica
+
+> Distribuidora de materiais elétricos no Bom Retiro, em São Paulo (SP). Vende fios e cabos, disjuntores e quadros, iluminação LED, infraestrutura elétrica, tomadas e interruptores, automação e comandos para construtoras, indústrias, instaladores e consumidores finais. Faturamento para CNPJ e cotação pelo site ou WhatsApp.
+
+Preços, estoque e prazos não são publicados no site: são informados pelo balcão no orçamento. Para cotar, o cliente envia a lista de materiais pelo formulário em https://phoenixel.com.br/cotacao ou pelo WhatsApp.
+
+## Contato
+
+- Endereço: R. Anhaia, 740 · Bom Retiro, São Paulo - SP · 01130-000
+- Telefone: (11) 3352-7777
+- WhatsApp (cotações): (11) 98323-9782 · https://wa.me/5511983239782
+- E-mail: phoenix@phoenixel.com.br
+- Horário: segunda a sexta, das 8h às 17h30
+
+## Páginas
+
+- [Página inicial](https://phoenixel.com.br/): apresentação da loja, categorias, diferenciais e avaliações de clientes
+- [Faça sua cotação](https://phoenixel.com.br/cotacao): formulário para enviar a lista de materiais (aceita anexo em PDF, Word, Excel ou foto) e receber o orçamento no WhatsApp
+
+## Categorias de produtos
+
+- [Fios e Cabos](https://phoenixel.com.br/fios-e-cabos): cabos flexíveis 750V, cabos 0,6/1kV, fios antichama e cabos de rede com certificação Inmetro
+- [Disjuntores e Quadros](https://phoenixel.com.br/disjuntores-e-quadros): mini disjuntores DIN curva B e C, DR, DPS e quadros de embutir e sobrepor
+- [Iluminação LED](https://phoenixel.com.br/iluminacao-led): refletores LED IP66, luminárias industriais High Bay, painéis LED 60x60 e fitas LED
+- [Infraestrutura Elétrica](https://phoenixel.com.br/infraestrutura-eletrica): eletrocalhas galvanizadas, perfilados, eletrodutos corrugados e rígidos, caixas de passagem e conduletes
+- [Tomadas e Interruptores](https://phoenixel.com.br/tomadas-e-interruptores): tomadas 10A e 20A, interruptores simples e paralelos, placas 4x2 e 4x4, módulos USB e caixas de piso
+- [Automação e Comandos](https://phoenixel.com.br/automacao-e-comandos): contatores de 9A a 150A, relés térmicos, inversores de frequência, botoeiras e multímetros True-RMS
+
+## Optional
+
+- [Mapa do site](https://phoenixel.com.br/sitemap.xml)

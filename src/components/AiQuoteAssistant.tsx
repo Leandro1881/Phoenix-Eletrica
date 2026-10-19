@@ -1,24 +1,22 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  Bot, 
-  Send, 
-  User, 
-  Sparkles, 
-  X, 
-  RotateCcw, 
-  CheckCircle2, 
-  ArrowRight, 
-  Layers, 
-  Copy, 
-  Check, 
+import {
+  Bot,
+  Send,
+  User,
+  Sparkles,
+  X,
+  RotateCcw,
+  CheckCircle2,
   Zap,
-  HelpCircle
+  ClipboardList,
+  ChevronDown
 } from 'lucide-react';
-import { 
-  ChatMessage, 
-  sendChatMessage, 
-  extractMaterialsList, 
-  PHOENIX_SYSTEM_PROMPT 
+import {
+  ChatMessage,
+  QuoteItem,
+  AgentStage,
+  sendChatMessage,
+  formatList
 } from '../services/aiService';
 
 interface AiQuoteAssistantProps {
@@ -27,31 +25,47 @@ interface AiQuoteAssistantProps {
   currentMaterials?: string;
 }
 
-const STORAGE_KEY = 'phoenix_ai_chat_history';
+// v2: conversa + lista estruturada + etapa (o formato antigo, só com mensagens, é descartado)
+const STORAGE_KEY = 'phoenix_ai_chat_v2';
 
-const INITIAL_MESSAGE: ChatMessage = {
-  id: 'welcome-msg',
+const WELCOME_TEXT =
+  'Olá! Sou o assistente de orçamento da Phoenix Elétrica. Me diga quais materiais elétricos você precisa (com quantidade e medida, se souber) ou que obra vai fazer. Eu monto a lista e, no final, peço seu OK para colocar no orçamento.';
+
+const welcomeMessage = (): ChatMessage => ({
+  id: `welcome-${Date.now()}`,
   sender: 'assistant',
-  text: 'Olá! Sou o assistente técnico de vendas da Phoenix Elétrica, em São Paulo. Me diga que materiais você precisa ou que obra vai realizar, e eu monto a lista estruturada para o seu orçamento!',
+  text: WELCOME_TEXT,
   timestamp: new Date()
-};
+});
 
-function loadStoredMessages(): ChatMessage[] {
-  if (typeof window === 'undefined') return [INITIAL_MESSAGE];
+interface ChatState {
+  messages: ChatMessage[];
+  items: QuoteItem[];
+  stage: AgentStage;
+}
+
+const freshState = (): ChatState => ({ messages: [welcomeMessage()], items: [], stage: 'coletando' });
+
+function loadStoredState(): ChatState {
+  if (typeof window === 'undefined') return freshState();
   try {
+    localStorage.removeItem('phoenix_ai_chat_history');
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [INITIAL_MESSAGE];
+    if (!raw) return freshState();
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed.map((m: any) => ({
-        ...m,
-        timestamp: new Date(m.timestamp)
-      }));
+    // Lista já enviada ao formulário: recomeça a conversa
+    if (parsed?.stage === 'confirmado') return freshState();
+    if (Array.isArray(parsed?.messages) && parsed.messages.length > 0) {
+      return {
+        messages: parsed.messages.map((m: any) => ({ ...m, timestamp: new Date(m.timestamp) })),
+        items: Array.isArray(parsed.items) ? parsed.items : [],
+        stage: parsed.stage === 'aguardando_confirmacao' ? 'aguardando_confirmacao' : 'coletando'
+      };
     }
   } catch (e) {
     console.warn('Erro ao carregar histórico do chat:', e);
   }
-  return [INITIAL_MESSAGE];
+  return freshState();
 }
 
 /**
@@ -75,7 +89,7 @@ function renderFormattedMessage(text: string, isUser: boolean) {
 
         // Detecta marcadores de lista (* item, - item, • item, 1. item, * **item**)
         const bulletMatch = trimmed.match(/^([*\-•]|\d+\.)\s+(.*)$/);
-        
+
         let contentToFormat = trimmed;
         let isBullet = false;
 
@@ -122,34 +136,30 @@ function renderFormattedMessage(text: string, isUser: boolean) {
 
 export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
   onApplyMaterials,
-  onClose,
-  currentMaterials = ''
+  onClose
 }) => {
-  const [messages, setMessages] = useState<ChatMessage[]>(loadStoredMessages);
+  const [chat, setChat] = useState<ChatState>(loadStoredState);
+  const { messages, items, stage } = chat;
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [justApplied, setJustApplied] = useState(false);
+  const [showList, setShowList] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   useEffect(() => {
-    scrollToBottom();
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  // Salva no localStorage sempre que o histórico for atualizado
+  // Salva no localStorage sempre que a conversa ou a lista mudar
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(chat));
     } catch (e) {
       console.warn('Erro ao salvar histórico do chat:', e);
     }
-  }, [messages]);
+  }, [chat]);
 
   // Sugestões rápidas de início de atendimento
   const quickPrompts = [
@@ -171,127 +181,50 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
     };
 
     const newHistory = [...messages, userMessage];
-    setMessages(newHistory);
+    setChat((prev) => ({ ...prev, messages: newHistory }));
     setInputValue('');
     setIsLoading(true);
 
     try {
-      const responseText = await sendChatMessage(newHistory);
-      
+      const result = await sendChatMessage(newHistory, items, stage);
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
         sender: 'assistant',
-        text: responseText,
-        timestamp: new Date(),
-        isFinalList: responseText.toLowerCase().includes('lista') && (
-          responseText.toLowerCase().includes('pronta') || 
-          responseText.toLowerCase().includes('estruturada') ||
-          responseText.toLowerCase().includes('confirmada') ||
-          responseText.toLowerCase().includes('finalizada') ||
-          responseText.includes('•')
-        )
+        text: result.text,
+        timestamp: new Date()
       };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      setChat((prev) => ({
+        messages: [...prev.messages, assistantMessage],
+        items: result.items,
+        stage: result.stage
+      }));
 
-      // Detecta se a resposta confirma a lista e o envio/encaminhamento ao balcão
-      const lowerResp = responseText.toLowerCase();
-      const lowerUserPrompt = text.toLowerCase();
-      
-      const isConfirmedToBalcao = 
-        lowerResp.includes('encaminhada ao balcão') ||
-        lowerResp.includes('encaminhado ao balcão') ||
-        lowerResp.includes('lista confirmada') ||
-        lowerResp.includes('enviada ao balcão') ||
-        lowerResp.includes('encaminhando ao balcão') ||
-        (
-          (lowerUserPrompt.includes('sim') || lowerUserPrompt.includes('pode') || lowerUserPrompt.includes('confirmo') || lowerUserPrompt.includes('encaminh') || lowerUserPrompt.includes('favor')) &&
-          (lowerResp.includes('balcão') || lowerResp.includes('valores') || lowerResp.includes('equipe') || lowerResp.includes('condições'))
-        );
-
-      if (isConfirmedToBalcao) {
-        // Extrai a relação de materiais da resposta ou do histórico
-        let listToInsert = extractMaterialsList(responseText);
-        if (!listToInsert || listToInsert.trim().length < 3) {
-          const allAssistant = newHistory
-            .filter((m) => m.sender === 'assistant')
-            .map((m) => m.text)
-            .join('\n');
-          listToInsert = extractMaterialsList(allAssistant);
-        }
-
-        if (listToInsert && listToInsert.trim()) {
-          onApplyMaterials(listToInsert.trim());
-          setJustApplied(true);
-          setTimeout(() => setJustApplied(false), 4000);
-        }
+      // Cliente deu OK na lista: vai para o formulário e a conversa recomeça na próxima abertura
+      if (result.stage === 'confirmado' && result.items.length) {
+        onApplyMaterials(formatList(result.items));
+        setJustApplied(true);
+        setTimeout(() => {
+          setJustApplied(false);
+          setChat(freshState());
+          setShowList(false);
+          if (onClose) onClose();
+        }, 2500);
       }
-    } catch (err) {
-      console.error('Erro na resposta da IA:', err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          sender: 'assistant',
-          text: 'Tivemos uma oscilação na conexão com o assistente. Por favor, tente novamente ou digite os materiais diretamente no formulário.',
-          timestamp: new Date()
-        }
-      ]);
     } finally {
       setIsLoading(false);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
   };
 
-  const handleApplyList = (textToExtract?: string) => {
-    // Se passou texto específico (da mensagem clicada), usa ele; senão usa todas as mensagens da conversa
-    const sourceText = textToExtract || messages
-      .filter((m) => m.sender === 'assistant')
-      .map((m) => m.text)
-      .join('\n');
-
-    let extracted = extractMaterialsList(sourceText);
-
-    // Se a extração automática estiver vazia, consolida as mensagens do usuário
-    if (!extracted || extracted.length < 5) {
-      extracted = messages
-        .filter((m) => m.sender === 'user')
-        .map((m) => `• ${m.text}`)
-        .join('\n');
-    }
-
-    if (extracted) {
-      onApplyMaterials(extracted);
-      setJustApplied(true);
-      setTimeout(() => {
-        setJustApplied(false);
-        if (onClose) onClose();
-      }, 1200);
-    }
-  };
-
-  const handleCopyText = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
-
   const handleResetChat = () => {
-    const resetMsg: ChatMessage = {
-      id: `welcome-reset-${Date.now()}`,
-      sender: 'assistant',
-      text: 'Conversa reiniciada. Em que posso ajudar você a montar a lista de materiais elétricos da Phoenix Elétrica?',
-      timestamp: new Date()
-    };
-    setMessages([resetMsg]);
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify([resetMsg]));
-    } catch (_) {}
+    setChat(freshState());
+    setShowList(false);
   };
 
   return (
     <div className="flex flex-col h-[520px] max-h-[85vh] bg-white rounded-xl shadow-xl border border-slate-300 overflow-hidden animate-fadeIn">
-      
+
       {/* 1. Header do Chatbot Phoenix Elétrica */}
       <div className="bg-gradient-to-r from-[#003882] via-[#004b9c] to-[#002f6c] p-3.5 sm:p-4 text-white flex items-center justify-between shadow-md shrink-0">
         <div className="flex items-center gap-2.5">
@@ -320,6 +253,7 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
             onClick={handleResetChat}
             className="p-1.5 text-blue-200 hover:text-white hover:bg-white/10 rounded-md transition-colors cursor-pointer"
             title="Reiniciar conversa"
+            aria-label="Reiniciar conversa"
           >
             <RotateCcw className="w-4 h-4" />
           </button>
@@ -329,6 +263,7 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
               onClick={onClose}
               className="p-1.5 text-blue-200 hover:text-white hover:bg-white/10 rounded-md transition-colors cursor-pointer"
               title="Fechar assistente"
+              aria-label="Fechar assistente"
             >
               <X className="w-5 h-5" />
             </button>
@@ -337,13 +272,13 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
       </div>
 
       {/* 2. Área de Mensagens */}
-      <div className="flex-1 overflow-y-auto p-3.5 sm:p-4 space-y-3.5 bg-slate-50/70">
-        
+      <div className="flex-1 overflow-y-auto p-3.5 sm:p-4 space-y-3.5 bg-slate-50/70" aria-live="polite">
+
         {/* Aviso de Guardrails / Balcão */}
         <div className="bg-blue-50/90 border border-blue-200/90 rounded-lg p-2.5 text-[11px] text-[#003882] flex items-center gap-2 shadow-2xs">
           <Zap className="w-4 h-4 text-[#d31010] shrink-0" />
           <span>
-            <strong>Foco Técnico:</strong> Ajudamos você a dimensionar e listar materiais. Preços e prazos finais são calculados no balcão da Phoenix Elétrica.
+            <strong>Foco Técnico:</strong> Ajudamos você a listar os materiais. Preços e prazos são informados pelo balcão da Phoenix Elétrica.
           </span>
         </div>
 
@@ -361,7 +296,7 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
                 </div>
               )}
 
-              <div className={`max-w-[85%] sm:max-w-[78%] space-y-1.5`}>
+              <div className="max-w-[85%] sm:max-w-[78%]">
                 <div
                   className={`p-3 rounded-xl text-xs sm:text-[13px] leading-relaxed shadow-2xs ${
                     isUser
@@ -371,39 +306,6 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
                 >
                   {renderFormattedMessage(msg.text, isUser)}
                 </div>
-
-                {/* Se a mensagem for do assistente e contiver uma lista real com marcadores, exibe botão de ação rápida */}
-                {!isUser && msg.id !== 'welcome-msg' && !msg.id.startsWith('welcome-') && (msg.text.includes('•') || /^\s*[-*•]\s+/m.test(msg.text) || msg.isFinalList) && (
-                  <div className="flex items-center gap-2 pt-0.5">
-                    <button
-                      type="button"
-                      onClick={() => handleApplyList(msg.text)}
-                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold transition-all shadow-2xs cursor-pointer"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>Usar Esta Lista no Orçamento</span>
-                    </button>
-                    
-                    <button
-                      type="button"
-                      onClick={() => handleCopyText(msg.id, msg.text)}
-                      className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-800 p-1 rounded hover:bg-slate-200 transition-colors"
-                      title="Copiar texto"
-                    >
-                      {copiedId === msg.id ? (
-                        <>
-                          <Check className="w-3 h-3 text-emerald-600" />
-                          <span className="text-emerald-700">Copiado</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" />
-                          <span>Copiar</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                )}
               </div>
 
               {isUser && (
@@ -431,7 +333,7 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
         )}
 
         {/* Sugestões rápidas para começar se houver poucas mensagens */}
-        {messages.length <= 2 && !isLoading && (
+        {messages.length <= 1 && !isLoading && (
           <div className="pt-2 space-y-1.5">
             <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
               <Sparkles className="w-3 h-3 text-[#004b9c]" />
@@ -455,14 +357,35 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* 3. Rodapé do Chat com Campo de Texto e Botão de Aplicar */}
+      {/* 3. Rodapé do Chat: lista anotada até agora e campo de texto */}
       <div className="p-3 bg-white border-t border-slate-200 space-y-2 shrink-0">
-        
+
+        {/* Itens anotados (só para conferência; a lista vai ao orçamento quando o cliente responde OK) */}
+        {items.length > 0 && stage === 'coletando' && !justApplied && (
+          <div className="text-[11px]">
+            <button
+              type="button"
+              onClick={() => setShowList((v) => !v)}
+              aria-expanded={showList}
+              className="inline-flex items-center gap-1.5 text-[#003882] font-bold hover:underline cursor-pointer"
+            >
+              <ClipboardList className="w-3.5 h-3.5" />
+              <span>{items.length} {items.length === 1 ? 'item anotado' : 'itens anotados'}</span>
+              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showList ? 'rotate-180' : ''}`} />
+            </button>
+            {showList && (
+              <div className="mt-1.5 max-h-28 overflow-y-auto rounded-md bg-slate-50 border border-slate-200 p-2 text-slate-700 whitespace-pre-line">
+                {formatList(items)}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Notificação de sucesso ao aplicar */}
         {justApplied ? (
           <div className="p-2 bg-emerald-50 border border-emerald-300 rounded-lg text-xs text-emerald-800 font-bold flex items-center justify-center gap-2 animate-fadeIn">
             <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-            <span>Lista de materiais transferida para o seu orçamento com sucesso!</span>
+            <span>Lista colocada no seu orçamento!</span>
           </div>
         ) : (
           <div className="flex items-center gap-2">
@@ -478,7 +401,9 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
                   handleSendMessage();
                 }
               }}
-              placeholder="Ex: Preciso de 3 rolos de cabo 2.5mm e 4 disjuntores..."
+              placeholder={stage === 'aguardando_confirmacao' ? 'Responda OK ou diga o que mudar...' : 'Ex: 3 rolos de cabo 2,5mm² azul e 4 disjuntores 20A'}
+              aria-label="Mensagem para o assistente"
+              maxLength={2000}
               disabled={isLoading}
               className="flex-1 bg-slate-50 focus:bg-white text-slate-900 placeholder-slate-400 text-xs sm:text-sm px-3.5 py-2.5 rounded-lg border border-slate-300 focus:border-[#004b9c] focus:ring-2 focus:ring-blue-100 outline-none transition-all disabled:opacity-60"
             />
@@ -493,28 +418,12 @@ export const AiQuoteAssistant: React.FC<AiQuoteAssistantProps> = ({
               }}
               className="p-2.5 bg-[#004b9c] hover:bg-[#003882] text-white rounded-lg transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shadow-xs shrink-0"
               title="Enviar mensagem"
+              aria-label="Enviar mensagem"
             >
               <Send className="w-4 h-4" />
             </button>
           </div>
         )}
-
-        {/* Botão de Encerramento e Aplicação no Formulário Principal */}
-        <div className="flex items-center justify-between pt-1 text-[11px] text-slate-500">
-          <span className="hidden sm:inline">
-            Clique para enviar a lista para o campo de cotação
-          </span>
-          <button
-            type="button"
-            onClick={() => handleApplyList()}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-md transition-colors shadow-2xs cursor-pointer ml-auto"
-          >
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Inserir Lista no Orçamento</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
       </div>
 
     </div>

@@ -7,7 +7,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --legacy-peer-deps
 
 COPY . .
-RUN npm run build
+# Garante que nenhum .env, banco local ou credencial vá para a imagem
+RUN rm -rf .env .env.* gcp-key*.json phoenix_eletrica.db uploads backend standalone-frontend \
+ && npm run build
 
 ENV NODE_ENV=production
 ENV PORT=8080

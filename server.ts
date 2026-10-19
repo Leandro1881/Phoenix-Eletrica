@@ -9,8 +9,32 @@ import initSqlJs, { Database } from 'sql.js';
 import crypto from 'crypto';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { Storage } from '@google-cloud/storage';
-import { findPage, sitemapXml, NOT_FOUND } from './src/seo/pages';
+import QRCode from 'qrcode';
+import {
+  decryptSecret,
+  encryptSecret,
+  generateRecoveryCodes,
+  generateTotpSecret,
+  hashRecoveryCode,
+  totpUri,
+  verifyTotp
+} from './lib/totp';
+import { hasValidSignature } from './lib/fileSignature';
+import { findPage, sitemapXml, NOT_FOUND, ADMIN_PAGE } from './src/seo/pages';
 import { renderHead } from './src/seo/head';
+import {
+  AGENT_SYSTEM_PROMPT,
+  AGENT_RESPONSE_SCHEMA,
+  AgentMessage,
+  AgentReply,
+  CONFIRMED_TEXT,
+  buildStateInstruction,
+  fallbackReply,
+  finalizeReply,
+  isConfirmation,
+  sanitizeItems,
+  sanitizeStage
+} from './src/ai/quoteAgent';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,7 +52,8 @@ const CHAT_MAX_HISTORY = 20;
 const GEMINI_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash'];
 const GEMINI_TIMEOUT_MS = 12000;
 const CHAT_MAX_CHARS_PER_MESSAGE = 2000;
-const CHAT_MAX_OUTPUT_TOKENS = 1024;
+// Resposta em JSON com a lista inteira: precisa de mais espaço que um texto simples
+const CHAT_MAX_OUTPUT_TOKENS = 2048;
 const CHAT_IP_WINDOW_MS = 10 * 60 * 1000;
 const CHAT_IP_MAX_REQUESTS = Number(process.env.CHAT_IP_MAX_REQUESTS || 20);
 const CHAT_DAILY_MAX_REQUESTS = Number(process.env.CHAT_DAILY_MAX_REQUESTS || 1000);
@@ -96,6 +121,9 @@ const limitUpload = rateLimit('upload', 10 * 60 * 1000, 10, TOO_MANY);
 const limitOrcamento = rateLimit('orcamento', 10 * 60 * 1000, 5, TOO_MANY);
 const limitLead = rateLimit('lead', 10 * 60 * 1000, 10, TOO_MANY);
 const limitEvento = rateLimit('evento', 10 * 60 * 1000, 60, TOO_MANY);
+const limitAdmin = rateLimit('admin', 60 * 1000, 60, TOO_MANY);
+// Teto geral por IP em toda a API (robôs e varreduras)
+const limitApi = rateLimit('api', 60 * 1000, 120, TOO_MANY);
 
 // Corta o texto no tamanho máximo do campo
 const clip = (value: unknown, max: number) => String(value ?? '').trim().substring(0, max);
@@ -140,6 +168,8 @@ process.on('SIGTERM', () => {
 // Upload de anexos (Google Cloud Storage quando GCS_BUCKET está definido)
 // =========================================================================
 const UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
+const UPLOAD_DAILY_MAX = Number(process.env.UPLOAD_DAILY_MAX || 300);
+let uploadDailyCount = { day: new Date().toISOString().slice(0, 10), total: 0 };
 const UPLOAD_CONTENT_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.doc': 'application/msword',
@@ -174,19 +204,48 @@ function getStorage(): Storage {
 
 // =========================================================================
 // Autenticação do painel administrativo (validada no servidor)
+// Sessão em cookie HttpOnly (JavaScript da página não lê), 2FA obrigatório (TOTP),
+// bloqueio por tentativas, revogação de sessões e proteção contra CSRF.
 // =========================================================================
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-// Com ADMIN_SESSION_SECRET definido, o login vale entre reinícios/instâncias; sem ele, cada reinício pede login de novo
-const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+// Sem uso por 1 hora, a sessão expira
+const ADMIN_IDLE_MS = 60 * 60 * 1000;
+const MFA_TOKEN_TTL_MS = 5 * 60 * 1000;
+const MFA_MAX_ATTEMPTS = 5;
+const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || '';
+const ADMIN_SECRET_OK = ADMIN_SESSION_SECRET.length >= 32;
+// Em desenvolvimento sem segredo, usa um aleatório (login cai a cada reinício)
+const SIGNING_SECRET = ADMIN_SECRET_OK ? ADMIN_SESSION_SECRET : crypto.randomBytes(32).toString('hex');
+// Em produção, sem segredo forte o login do painel fica desligado (falha fechada)
+const ADMIN_LOGIN_ENABLED = ADMIN_SECRET_OK || !IS_PRODUCTION;
+const SESSION_COOKIE = IS_PRODUCTION ? '__Host-phx_sess' : 'phx_sess';
+// Cabeçalho exigido nas rotas do painel: outro site não consegue enviá-lo (bloqueia CSRF)
+const ADMIN_CSRF_HEADER = 'x-phoenix-admin';
+
+// Endereço secreto do painel (ex.: /gestao-8f3k2m9q1x). Sem ADMIN_PATH válido, o painel não abre em produção.
+const ADMIN_PATH = (() => {
+  const raw = String(process.env.ADMIN_PATH || '').trim().toLowerCase().replace(/\/+$/, '');
+  if (/^\/[a-z0-9-]{12,64}$/.test(raw)) return raw;
+  if (raw) console.warn('⚠ [ADMIN] ADMIN_PATH inválido: use /letras-numeros com 12 a 64 caracteres.');
+  return IS_PRODUCTION ? '' : '/painel-local-dev';
+})();
+
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_MAX_FAILURES = 5;
+const LOGIN_MAX_FAILURES_IP = 5;
+const LOGIN_MAX_FAILURES_USER = 10;
+const LOGIN_LOCK_MS = 30 * 60 * 1000;
 const loginFailuresByIp = new Map<string, number[]>();
+const mfaAttempts = new Map<string, number>();
 
 function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
   return ['scrypt', salt, hash].join('$');
 }
+
+// Hash descartável: usuário inexistente gasta o mesmo tempo (não revela quais usuários existem)
+const DUMMY_PASSWORD_HASH = hashPassword(crypto.randomBytes(16).toString('hex'));
 
 function verifyPassword(password: string, stored: string): boolean {
   if (stored.startsWith('scrypt$')) {
@@ -201,33 +260,155 @@ function verifyPassword(password: string, stored: string): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-function signAdminToken(usuario: string): string {
-  const payload = Buffer.from(JSON.stringify({ u: usuario, exp: Date.now() + ADMIN_SESSION_TTL_MS })).toString('base64url');
-  const sig = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('base64url');
+const COMMON_PASSWORDS = ['123456789012', 'senha1234567', 'phoenix12345', 'phoenixeletrica', 'admin1234567', 'qwertyuiop12', 'password1234'];
+
+// Regra de senha forte; devolve a mensagem de erro ou null
+function passwordPolicyError(password: string, usuario: string): string | null {
+  if (password.length < 12) return 'A senha deve ter no mínimo 12 caracteres.';
+  if (password.length > 128) return 'A senha deve ter no máximo 128 caracteres.';
+  const lower = password.toLowerCase();
+  if (usuario && lower.includes(usuario.toLowerCase())) return 'A senha não pode conter o nome de usuário.';
+  if (COMMON_PASSWORDS.some((c) => lower.includes(c))) return 'Senha muito comum. Escolha outra.';
+  const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/].filter((re) => re.test(password)).length;
+  if (classes < 3) return 'Use pelo menos 3 destes: letra minúscula, maiúscula, número e símbolo.';
+  return null;
+}
+
+// Token assinado (HMAC-SHA256). p = finalidade: 'sess' (sessão) ou 'mfa' (etapa do código 2FA)
+interface AdminTokenData {
+  p: 'sess' | 'mfa';
+  u: string;
+  v: number;
+  exp: number;
+  la?: number;
+  e?: 1;
+  jti: string;
+}
+
+function signAdminToken(data: Omit<AdminTokenData, 'jti'> & { jti?: string }): string {
+  const full: AdminTokenData = { ...data, jti: data.jti || crypto.randomBytes(12).toString('base64url') };
+  const payload = Buffer.from(JSON.stringify(full)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SIGNING_SECRET).update(payload).digest('base64url');
   return payload + '.' + sig;
 }
 
-function verifyAdminToken(token: string): { u: string } | null {
-  const [payload, sig] = token.split('.');
-  if (!payload || !sig) return null;
-  const expected = crypto.createHmac('sha256', ADMIN_SESSION_SECRET).update(payload).digest('base64url');
+function verifyAdminToken(token: string, purpose: AdminTokenData['p']): AdminTokenData | null {
+  const [payload, sig, extra] = String(token || '').split('.');
+  if (!payload || !sig || extra !== undefined) return null;
+  const expected = crypto.createHmac('sha256', SIGNING_SECRET).update(payload).digest('base64url');
   if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
   try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
-    return data.exp > Date.now() ? { u: data.u } : null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString()) as AdminTokenData;
+    if (data.p !== purpose || typeof data.u !== 'string' || !(data.exp > Date.now())) return null;
+    return data;
   } catch {
     return null;
   }
 }
 
+function getCookie(req: express.Request, name: string): string {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0 && part.slice(0, idx).trim() === name) return decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return '';
+}
+
+function setSessionCookie(res: express.Response, token: string, expiresAt: number) {
+  res.cookie(SESSION_COOKIE, token, {
+    httpOnly: true,
+    secure: IS_PRODUCTION,
+    sameSite: 'strict',
+    path: '/',
+    maxAge: Math.max(0, expiresAt - Date.now())
+  });
+}
+
+function clearSessionCookie(res: express.Response) {
+  res.clearCookie(SESSION_COOKIE, { httpOnly: true, secure: IS_PRODUCTION, sameSite: 'strict', path: '/' });
+}
+
+interface AdminRow {
+  id: number;
+  usuario: string;
+  senha: string;
+  totpSecret: string | null;
+  totpPendente: string | null;
+  totpAtivo: boolean;
+  totpUltimoPasso: number | null;
+  recuperacao: string[];
+  sessaoVersao: number;
+  falhasLogin: number;
+  bloqueadoAte: number;
+}
+
+function getAdminRow(usuario: string): AdminRow | null {
+  if (!db || !usuario) return null;
+  const res = db.exec(
+    `SELECT id, usuario, senha, totp_secret, totp_pendente, totp_ativo, totp_ultimo_passo, recuperacao, sessao_versao, falhas_login, bloqueado_ate
+     FROM admin_auth WHERE LOWER(usuario) = LOWER(?) LIMIT 1`,
+    [usuario.trim()]
+  );
+  const row = res[0]?.values[0];
+  if (!row) return null;
+  let recuperacao: string[] = [];
+  try {
+    recuperacao = JSON.parse(String(row[7] || '[]'));
+  } catch {}
+  return {
+    id: Number(row[0]),
+    usuario: String(row[1]),
+    senha: String(row[2]),
+    totpSecret: row[3] ? String(row[3]) : null,
+    totpPendente: row[4] ? String(row[4]) : null,
+    totpAtivo: Number(row[5]) === 1,
+    totpUltimoPasso: row[6] === null || row[6] === undefined ? null : Number(row[6]),
+    recuperacao: Array.isArray(recuperacao) ? recuperacao : [],
+    sessaoVersao: Number(row[8] || 1),
+    falhasLogin: Number(row[9] || 0),
+    bloqueadoAte: Number(row[10] || 0)
+  };
+}
+
+// Histórico de acessos do painel (o lojista vê na aba Segurança)
+function logAdminEvent(req: express.Request, usuario: string, evento: string, sucesso: boolean) {
+  try {
+    if (!db) return;
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    db.run(
+      `INSERT INTO admin_acessos (data_hora, usuario, ip, navegador, evento, sucesso) VALUES (?, ?, ?, ?, ?, ?)`,
+      [now, usuario.substring(0, 60), String(req.ip || '').substring(0, 60), String(req.headers['user-agent'] || '').substring(0, 160), evento, sucesso ? 1 : 0]
+    );
+    db.run(`DELETE FROM admin_acessos WHERE id NOT IN (SELECT id FROM admin_acessos ORDER BY id DESC LIMIT 300)`);
+  } catch (err) {
+    console.error('Erro ao registrar acesso do painel:', err);
+  }
+}
+
+function issueSession(res: express.Response, row: AdminRow) {
+  const exp = Date.now() + ADMIN_SESSION_TTL_MS;
+  setSessionCookie(res, signAdminToken({ p: 'sess', u: row.usuario, v: row.sessaoVersao, exp, la: Date.now() }), exp);
+}
+
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const session = token ? verifyAdminToken(token) : null;
-  if (!session) {
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.get(ADMIN_CSRF_HEADER) !== '1') {
+    return res.status(403).json({ success: false, message: 'Requisição recusada.' });
+  }
+  const session = verifyAdminToken(getCookie(req, SESSION_COOKIE), 'sess');
+  const now = Date.now();
+  const row = session ? getAdminRow(session.u) : null;
+  // Sessão revogada (troca de senha, "sair de todos") ou 2FA desligado: não vale mais
+  if (!session || !row || row.sessaoVersao !== session.v || !row.totpAtivo || now - (session.la || 0) > ADMIN_IDLE_MS) {
+    clearSessionCookie(res);
     return res.status(401).json({ success: false, message: 'Sessão expirada. Faça login novamente.' });
   }
-  (req as any).adminUser = session.u;
+  // Renova o tempo de inatividade a cada 5 minutos de uso (o limite total de 8 h não muda)
+  if (now - (session.la || 0) > 5 * 60 * 1000) {
+    setSessionCookie(res, signAdminToken({ ...session, la: now, jti: undefined }), session.exp);
+  }
+  (req as any).adminUser = row.usuario;
   next();
 }
 
@@ -235,14 +416,25 @@ function tooManyLoginFailures(ip: string): boolean {
   const now = Date.now();
   const recent = (loginFailuresByIp.get(ip) || []).filter((t) => now - t < LOGIN_WINDOW_MS);
   loginFailuresByIp.set(ip, recent);
-  return recent.length >= LOGIN_MAX_FAILURES;
+  return recent.length >= LOGIN_MAX_FAILURES_IP;
 }
 
-function registerLoginFailure(ip: string) {
+function registerLoginFailure(ip: string, row: AdminRow | null) {
   const list = loginFailuresByIp.get(ip) || [];
   list.push(Date.now());
   loginFailuresByIp.set(ip, list);
+  // Bloqueio por usuário: protege contra tentativas vindas de muitos IPs diferentes
+  if (row && db) {
+    const falhas = row.falhasLogin + 1;
+    const bloqueio = falhas >= LOGIN_MAX_FAILURES_USER ? Date.now() + LOGIN_LOCK_MS : row.bloqueadoAte;
+    db.run(`UPDATE admin_auth SET falhas_login = ?, bloqueado_ate = ? WHERE id = ?`, [falhas >= LOGIN_MAX_FAILURES_USER ? 0 : falhas, bloqueio, row.id]);
+  }
 }
+
+// Dados pessoais mascarados nos logs (LGPD): logs não precisam do telefone ou e-mail completo
+const maskPhone = (v: string) => (v ? v.replace(/\d(?=\d{2})/g, '*') : '');
+const maskEmail = (v: string) => (v ? v.replace(/^(.).*?(@.*)$/, '$1***$2') : '');
+const maskName = (v: string) => (v ? v.split(/\s+/)[0].substring(0, 20) : '');
 
 // Token fixo devolvido pelas chaves de teste do Cloudflare Turnstile
 const TURNSTILE_TEST_TOKEN = 'XXXX.DUMMY.TOKEN.XXXX';
@@ -330,111 +522,6 @@ async function fetchGooglePlaceReviews(): Promise<any | null> {
   }
 }
 
-// Normaliza especificações técnicas e corrige typos de teclado mobile (ex: 15.mm2 -> 1,5mm²)
-function normalizeSpec(text: string): string {
-  let s = text.trim();
-  s = s.replace(/\b15\.?mm[²2]?\b/gi, '1,5mm²');
-  s = s.replace(/\b1[.,]5\s*mm[²2]?\b/gi, '1,5mm²');
-  s = s.replace(/\b25\.?mm[²2]?\b/gi, '2,5mm²');
-  s = s.replace(/\b2[.,]5\s*mm[²2]?\b/gi, '2,5mm²');
-  s = s.replace(/\b4\.?0?\s*mm[²2]?\b/gi, '4mm²');
-  s = s.replace(/\b6\.?0?\s*mm[²2]?\b/gi, '6mm²');
-  s = s.replace(/\b10\.?0?\s*mm[²2]?\b/gi, '10mm²');
-  s = s.replace(/\b16\.?0?\s*mm[²2]?\b/gi, '16mm²');
-  s = s.replace(/²+/g, '²');
-  s = s.replace(/\bcore\s+/gi, 'cor ');
-  return s;
-}
-
-function formatCableItem(c: { quantity?: string; gauge?: string; color?: string; name?: string }): string {
-  const parts: string[] = [];
-  if (c.quantity) {
-    parts.push(c.quantity);
-    parts.push('de');
-  }
-  parts.push(c.name || 'cabo flexível');
-  if (c.gauge) parts.push(c.gauge);
-  if (c.color) parts.push(`- ${c.color}`);
-  const raw = parts.join(' ').replace(/\s+/g, ' ').trim();
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
-}
-
-function consolidateMaterials(rawCandidates: string[]): string[] {
-  if (rawCandidates.length === 0) return [];
-  if (rawCandidates.length === 1) {
-    const single = normalizeSpec(rawCandidates[0]);
-    if (/^\d+\s*rolos?$/i.test(single)) {
-      return [`${single} de cabo flexível`];
-    }
-    return [single];
-  }
-
-  const result: string[] = [];
-  let pendingCable: { quantity?: string; gauge?: string; color?: string; name?: string } | null = null;
-
-  for (const item of rawCandidates) {
-    const norm = normalizeSpec(item);
-    const lower = norm.toLowerCase();
-
-    const isDistinctNonCable = 
-      lower.includes('iluminação') || lower.includes('led') || lower.includes('lâmpada') || 
-      lower.includes('refletor') || lower.includes('fita') || lower.includes('eletroduto') || 
-      lower.includes('tomada') || lower.includes('interruptor') || lower.includes('caixa 4x2') || 
-      lower.includes('canaleta') || lower.includes('disjuntor') || lower.includes('wago');
-
-    if (isDistinctNonCable) {
-      if (pendingCable) {
-        result.push(formatCableItem(pendingCable));
-        pendingCable = null;
-      }
-      result.push(norm);
-      continue;
-    }
-
-    const isCableRelated = 
-      lower.includes('cabo') || lower.includes('fio') || lower.includes('rolo') || 
-      /\b\d+([.,]\d+)?\s*mm[²2]?\b/i.test(lower) || 
-      lower.includes('cor azul') || lower.includes('cor preta') || lower.includes('cor vermelho') ||
-      lower.includes('azul') || lower.includes('preto') || lower.includes('vermelho') || 
-      lower.includes('verde') || lower.includes('amarelo') || lower.includes('branco');
-
-    if (isCableRelated) {
-      if (!pendingCable) {
-        pendingCable = {};
-      }
-
-      const qtyMatch = norm.match(/\b(\d+\s*(rolos?|metros?|m))\b/i);
-      if (qtyMatch) {
-        pendingCable.quantity = qtyMatch[1];
-      }
-
-      const gaugeMatch = norm.match(/(\d+([.,]\d+)?\s*mm[²2]?)/i);
-      if (gaugeMatch) {
-        pendingCable.gauge = gaugeMatch[1];
-      }
-
-      const colorMatch = norm.match(/\b(cor\s+)?(azul|preto|vermelho|verde|amarelo|branco|cinza)\b/i);
-      if (colorMatch) {
-        pendingCable.color = colorMatch[0].toLowerCase().startsWith('cor ') ? colorMatch[0] : `cor ${colorMatch[0]}`;
-      }
-
-      if (lower.includes('flexível') || lower.includes('flexivel')) {
-        pendingCable.name = 'cabo flexível';
-      }
-
-      continue;
-    }
-
-    result.push(norm);
-  }
-
-  if (pendingCable) {
-    result.push(formatCableItem(pendingCable));
-  }
-
-  return result.filter(Boolean);
-}
-
 // Inicialização do Banco SQLite
 async function setupDatabase() {
   try {
@@ -519,17 +606,59 @@ async function setupDatabase() {
       )
     `);
 
+    // Colunas do 2FA, bloqueio por tentativas e revogação de sessões (bancos antigos ganham as colunas aqui)
+    const adminColumns = [
+      `totp_secret TEXT`,
+      `totp_pendente TEXT`,
+      `totp_ativo INTEGER DEFAULT 0`,
+      `totp_ultimo_passo INTEGER`,
+      `recuperacao TEXT DEFAULT '[]'`,
+      `sessao_versao INTEGER DEFAULT 1`,
+      `falhas_login INTEGER DEFAULT 0`,
+      `bloqueado_ate INTEGER DEFAULT 0`
+    ];
+    for (const col of adminColumns) {
+      try {
+        db.run(`ALTER TABLE admin_auth ADD COLUMN ${col}`);
+      } catch (_) {}
+    }
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS admin_acessos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        data_hora TEXT NOT NULL,
+        usuario TEXT,
+        ip TEXT,
+        navegador TEXT,
+        evento TEXT NOT NULL,
+        sucesso INTEGER NOT NULL
+      )
+    `);
+
     // Cria o login do painel a partir de ADMIN_USER / ADMIN_PASSWORD (nunca senha fixa no código)
     const adminCheck = db.exec(`SELECT COUNT(*) as total FROM admin_auth`);
     const totalAdmin = adminCheck[0]?.values[0]?.[0] || 0;
     if (totalAdmin === 0) {
-      const adminUser = process.env.ADMIN_USER || 'admin';
-      const adminPassword = process.env.ADMIN_PASSWORD;
-      if (adminPassword && adminPassword.length >= 10) {
+      const adminUser = String(process.env.ADMIN_USER || '').trim();
+      const adminPassword = process.env.ADMIN_PASSWORD || '';
+      const policyError = adminPassword ? passwordPolicyError(adminPassword, adminUser) : 'ADMIN_PASSWORD ausente.';
+      // Sem usuário padrão ("admin"): o nome também precisa ser definido
+      if (adminUser.length >= 4 && !policyError) {
         db.run(`INSERT INTO admin_auth (usuario, senha) VALUES (?, ?)`, [adminUser, hashPassword(adminPassword)]);
       } else {
-        console.warn('⚠ [ADMIN] Defina ADMIN_PASSWORD (mín. 10 caracteres) para habilitar o login do painel.');
+        console.warn(`⚠ [ADMIN] Defina ADMIN_USER (mín. 4 caracteres) e ADMIN_PASSWORD forte para criar o login do painel. ${policyError || ''}`);
       }
+    }
+
+    // Celular perdido sem códigos de recuperação: ADMIN_RESET_2FA=<usuario> desliga o 2FA desse usuário
+    // no próximo início (o próximo login cadastra um novo celular). Remova a variável depois.
+    const reset2fa = String(process.env.ADMIN_RESET_2FA || '').trim();
+    if (reset2fa) {
+      db.run(
+        `UPDATE admin_auth SET totp_secret = NULL, totp_pendente = NULL, totp_ativo = 0, totp_ultimo_passo = NULL, recuperacao = '[]', sessao_versao = sessao_versao + 1 WHERE LOWER(usuario) = LOWER(?)`,
+        [reset2fa]
+      );
+      console.warn(`⚠ [ADMIN] 2FA reiniciado para "${reset2fa}". Remova ADMIN_RESET_2FA do serviço.`);
     }
 
     // Sem dados de exemplo: pedidos, visitas e cliques vêm apenas do uso real do site
@@ -579,7 +708,8 @@ async function startServer() {
         frameAncestors: ["'self'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
-        formAction: ["'self'"]
+        formAction: ["'self'"],
+        upgradeInsecureRequests: []
       }
     } : false,
     // HSTS de 1 ano só no domínio principal (sem includeSubDomains: outros subdomínios podem não ter HTTPS)
@@ -608,11 +738,53 @@ async function startServer() {
     });
   }
 
+  // Permissões do navegador que o site não usa ficam desligadas
+  app.use((_req, res, next) => {
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()');
+    next();
+  });
+
+  // Nunca serve arquivos internos (.env, .git, código-fonte, banco, mapas de código), mesmo por engano
+  if (isProduction) {
+    const BLOCKED_PATH = /(^|\/)\.(?!well-known\/)|\.(map|ts|tsx|env|db|sqlite|sql|log|bak|old|py|ya?ml|lock|ini|pem|key)$|(^|\/)(package(-lock)?\.json|tsconfig\.json|dockerfile|server\.(ts|js)|node_modules|src|lib|backend|phoenix_eletrica)(\/|\.|$)/i;
+    app.use((req, res, next) => {
+      let p = req.path;
+      try {
+        p = decodeURIComponent(p);
+      } catch {
+        return res.status(400).send('Endereço inválido');
+      }
+      return BLOCKED_PATH.test(p) ? res.status(404).send('Não encontrado') : next();
+    });
+  }
+
+  // API: teto de requisições por IP e bloqueio de chamadas vindas de outros sites (CSRF)
+  app.use('/api', limitApi, (req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+    // Navegador avisa quando a chamada vem de outro site
+    if (req.get('sec-fetch-site') === 'cross-site') {
+      return res.status(403).json({ status: 'error', message: 'Origem não permitida.' });
+    }
+    const origin = req.get('origin');
+    if (origin) {
+      let sameHost = false;
+      try {
+        sameHost = new URL(origin).host === req.get('host');
+      } catch {}
+      if (!sameHost) return res.status(403).json({ status: 'error', message: 'Origem não permitida.' });
+    }
+    // Só JSON: formulários HTML de outros sites não conseguem enviar este tipo sem permissão (CORS)
+    if (!req.is('application/json')) {
+      return res.status(415).json({ status: 'error', message: 'Envie os dados em JSON.' });
+    }
+    next();
+  });
+
   // Corpo das requisições: 100kb em geral; só o upload aceita o arquivo em base64 (15MB viram ~20MB)
   const jsonSmall = express.json({ limit: '100kb' });
   const jsonUpload = express.json({ limit: '21mb' });
   app.use((req, res, next) => (req.path === '/api/upload' ? jsonUpload : jsonSmall)(req, res, next));
-  app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 
   // Diretório de Uploads para Anexos de Orçamentos (PDF, Word, Excel, etc.)
   const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
@@ -635,12 +807,8 @@ async function startServer() {
 
   // Rota de Health Check
   app.get('/api/health', (req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'Phoenix Elétrica API',
-      database: db ? 'connected' : 'initializing',
-      time: new Date().toISOString()
-    });
+    // Sem detalhes internos: só diz se o serviço está no ar
+    res.status(db ? 200 : 503).json({ status: db ? 'ok' : 'starting' });
   });
 
   // Rota POST: Upload de Arquivo de Orçamento (PDF, Word, etc.)
@@ -672,6 +840,21 @@ async function startServer() {
       if (buffer.length > UPLOAD_MAX_BYTES) {
         return res.status(413).json({ status: 'error', message: 'Arquivo acima de 15MB.' });
       }
+      if (buffer.length === 0) {
+        return res.status(400).json({ status: 'error', message: 'Arquivo vazio.' });
+      }
+      // Conteúdo precisa bater com a extensão (bloqueia arquivo disfarçado, ex.: página HTML renomeada para .pdf)
+      if (!hasValidSignature(cleanExt, buffer)) {
+        console.warn(`[UPLOAD] Recusado: conteúdo não confere com ${cleanExt}.`);
+        return res.status(400).json({ status: 'error', message: 'O conteúdo do arquivo não confere com o formato. Envie o arquivo original.' });
+      }
+      // Teto diário de uploads no site todo (protege o armazenamento contra abuso)
+      const today = new Date().toISOString().slice(0, 10);
+      if (uploadDailyCount.day !== today) uploadDailyCount = { day: today, total: 0 };
+      if (uploadDailyCount.total >= UPLOAD_DAILY_MAX) {
+        return res.status(429).json({ status: 'error', message: 'Limite diário de envios atingido. Envie a lista pelo WhatsApp.' });
+      }
+      uploadDailyCount.total += 1;
 
       const rawBaseName = path.basename(String(fileName), path.extname(String(fileName)));
       const safeBaseName = rawBaseName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
@@ -702,7 +885,7 @@ async function startServer() {
         fileUrl = `${baseUrl}/uploads/${safeFileName}`;
       }
 
-      console.log(`✓ [UPLOAD CONCLUÍDO] ${safeFileName} (${fileSize || 'N/A'}) - URL: ${fileUrl}`);
+      console.log(`✓ [UPLOAD CONCLUÍDO] ${cleanExt} (${fileSize || 'N/A'})`);
 
       return res.status(200).json({
         status: 'success',
@@ -720,7 +903,8 @@ async function startServer() {
     }
   });
 
-  // Rota POST: Assistente IA de Orçamento da Phoenix Elétrica (com Guardrails Estritos)
+  // Rota POST: Assistente IA de orçamento.
+  // Devolve a resposta, a lista estruturada de itens e a etapa da conversa (coletando, aguardando_confirmacao, confirmado).
   app.post('/api/chat-assistant', async (req, res) => {
     try {
       const { messages: rawMessages } = req.body;
@@ -731,80 +915,91 @@ async function startServer() {
         });
       }
 
+      // Limita tamanho do histórico e de cada mensagem para controlar o custo por chamada
+      const messages: AgentMessage[] = rawMessages
+        .slice(-CHAT_MAX_HISTORY)
+        .map((m: any) => ({
+          role: (m?.role === 'assistant' || m?.sender === 'assistant' ? 'assistant' : 'user') as AgentMessage['role'],
+          text: String(m?.text || m?.content || '').slice(0, CHAT_MAX_CHARS_PER_MESSAGE)
+        }))
+        .filter((m) => m.text.trim());
+      if (!messages.length || messages[messages.length - 1].role !== 'user') {
+        return res.status(400).json({ status: 'error', message: 'A última mensagem deve ser do cliente.' });
+      }
+
       const limitMessage = checkChatRateLimit(req.ip || 'desconhecido');
       if (limitMessage) {
         return res.status(429).json({ status: 'error', message: limitMessage });
       }
 
-      // Limita tamanho do histórico e de cada mensagem para controlar o custo por chamada
-      const messages = rawMessages.slice(-CHAT_MAX_HISTORY).map((m: any) => ({
-        ...m,
-        text: String(m?.text || m?.content || '').slice(0, CHAT_MAX_CHARS_PER_MESSAGE)
-      }));
+      // Lista e etapa atuais vêm do navegador (é a lista que o cliente está vendo)
+      const prevItems = sanitizeItems(req.body.items);
+      const prevStage = sanitizeStage(req.body.stage);
+      const lastText = messages[messages.length - 1].text;
 
-      const PHOENIX_SYSTEM_PROMPT = `És um assistente técnico de vendas da Phoenix Elétrica, em São Paulo. A tua ÚNICA função é ajudar o cliente a montar uma lista de materiais elétricos clara para orçamento. REGRAS ESTRITAS: 1. NUNCA forneça preços, descontos ou prazos. Responda que o balcão calculará isso. 2. Se o assunto não for material elétrico/obras, responda EXATAMENTE: 'Sou especialista apenas em materiais elétricos. Como posso ajudar com a sua lista?'. 3. Sugira itens complementares lógicos (ex: fita isolante para cabos), mas se o cliente dispensar ou disser que não precisa, NÃO inclua na lista. 4. Mantenha as respostas curtas e objetivas. 5. Quando o cliente finalizar a lista, retorne a lista estruturada contendo ESTRITAMENTE os materiais confirmados ou pedidos pelo cliente na conversa (sem adicionar itens que o cliente não pediu ou dispensou), com marcadores (•), e confirme que está pronta para envio ao balcão.`;
+      const send = (provider: string, reply: AgentReply, model?: string) =>
+        res.status(200).json({ status: 'success', provider, model, ...reply });
 
-      // 1. Prioridade para Gemini API (chave apenas no servidor, nunca com prefixo VITE_)
+      // OK na etapa de confirmação: resposta fixa, sem gastar chamada de IA
+      if (prevStage === 'aguardando_confirmacao' && isConfirmation(lastText)) {
+        return send('rules', { text: CONFIRMED_TEXT, items: prevItems, stage: 'confirmado' });
+      }
+
+      const systemInstruction = AGENT_SYSTEM_PROMPT + buildStateInstruction(prevItems, prevStage);
+
+      // Resposta do modelo em JSON; qualquer formato inválido é descartado (passa ao próximo modelo)
+      const parseModelJson = (raw: string): AgentReply | null => {
+        try {
+          const data = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
+          if (typeof data?.resposta !== 'string' || !Array.isArray(data?.itens)) return null;
+          return finalizeReply(clip(data.resposta, 3000), sanitizeItems(data.itens), sanitizeStage(data.etapa), prevItems, prevStage);
+        } catch {
+          return null;
+        }
+      };
+
+      // 1. Gemini (chave apenas no servidor, nunca com prefixo VITE_)
       const geminiApiKey = process.env.GEMINI_API_KEY;
       if (geminiApiKey) {
-        try {
-          const ai = new GoogleGenAI({ apiKey: geminiApiKey });
-          
-          // Gemini exige que a primeira mensagem em contents seja do usuário (role: user)
-          const firstUserIdx = messages.findIndex((m: any) => (m.role === 'user' || m.sender === 'user'));
-          const validMessages = firstUserIdx >= 0 ? messages.slice(firstUserIdx) : messages;
+        const ai = new GoogleGenAI({ apiKey: geminiApiKey });
+        // Gemini exige que a primeira mensagem em contents seja do usuário
+        const firstUserIdx = messages.findIndex((m) => m.role === 'user');
+        const contents = messages.slice(firstUserIdx).map((m) => ({
+          role: m.role === 'assistant' ? 'model' : 'user',
+          parts: [{ text: m.text }]
+        }));
 
-          const contents = validMessages.map((m: any) => ({
-            role: (m.role === 'assistant' || m.sender === 'assistant') ? 'model' : 'user',
-            parts: [{ text: String(m.text || m.content || '') }]
-          }));
-
-          // Tenta os modelos em ordem: se um estiver sobrecarregado (503) ou lento, passa ao próximo
-          for (const model of GEMINI_MODELS) {
-            try {
-              const geminiResponse = await ai.models.generateContent({
-                model,
-                contents,
-                config: {
-                  systemInstruction: PHOENIX_SYSTEM_PROMPT,
-                  temperature: 0.2,
-                  maxOutputTokens: CHAT_MAX_OUTPUT_TOKENS,
-                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                  httpOptions: { timeout: GEMINI_TIMEOUT_MS }
-                }
-              });
-
-              if (geminiResponse.text) {
-                return res.status(200).json({
-                  status: 'success',
-                  provider: 'gemini',
-                  model,
-                  text: geminiResponse.text.trim()
-                });
+        // Tenta os modelos em ordem: se um estiver sobrecarregado (503) ou lento, passa ao próximo
+        for (const model of GEMINI_MODELS) {
+          try {
+            const geminiResponse = await ai.models.generateContent({
+              model,
+              contents,
+              config: {
+                systemInstruction,
+                temperature: 0.1,
+                maxOutputTokens: CHAT_MAX_OUTPUT_TOKENS,
+                responseMimeType: 'application/json',
+                responseJsonSchema: AGENT_RESPONSE_SCHEMA,
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                httpOptions: { timeout: GEMINI_TIMEOUT_MS }
               }
-            } catch (modelError: any) {
-              console.warn(`[Gemini] ${model} falhou (${modelError?.status || 'timeout'}):`, String(modelError?.message || modelError).slice(0, 160));
-              // Chave inválida ou sem permissão: outros modelos também falhariam
-              if ([400, 401, 403].includes(modelError?.status)) break;
-            }
+            });
+            const reply = geminiResponse.text ? parseModelJson(geminiResponse.text) : null;
+            if (reply) return send('gemini', reply, model);
+            console.warn(`[Gemini] ${model} devolveu resposta fora do formato.`);
+          } catch (modelError: any) {
+            console.warn(`[Gemini] ${model} falhou (${modelError?.status || 'timeout'}):`, String(modelError?.message || modelError).slice(0, 160));
+            // Chave inválida, sem permissão ou sem créditos: outros modelos também falhariam
+            if ([400, 401, 402, 403].includes(modelError?.status)) break;
           }
-        } catch (geminiError: any) {
-          console.warn('Erro ao processar chamada Gemini no servidor:', geminiError?.message || geminiError);
         }
       }
 
-      // 2. Se houver OPENAI_API_KEY configurado (apenas no servidor)
+      // 2. OpenAI (apenas no servidor)
       const openAiApiKey = process.env.OPENAI_API_KEY;
       if (openAiApiKey) {
         try {
-          const openAiMessages = [
-            { role: 'system', content: PHOENIX_SYSTEM_PROMPT },
-            ...messages.map((m: any) => ({
-              role: (m.role === 'assistant' || m.sender === 'assistant') ? 'assistant' : 'user',
-              content: String(m.text || m.content || '')
-            }))
-          ];
-
           const openAiRes = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
@@ -813,357 +1008,34 @@ async function startServer() {
             },
             body: JSON.stringify({
               model: 'gpt-4o-mini',
-              messages: openAiMessages,
-              temperature: 0.2,
+              messages: [
+                {
+                  role: 'system',
+                  content: `${systemInstruction}\n\nResponda somente com um JSON neste formato: {"resposta": "...", "etapa": "coletando", "itens": [{"produto": "...", "especificacao": "...", "quantidade": "..."}]}`
+                },
+                ...messages.map((m) => ({ role: m.role, content: m.text }))
+              ],
+              temperature: 0.1,
               max_tokens: CHAT_MAX_OUTPUT_TOKENS,
-            })
+              response_format: { type: 'json_object' }
+            }),
+            signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS)
           });
 
           if (openAiRes.ok) {
             const data: any = await openAiRes.json();
-            const text = data.choices?.[0]?.message?.content;
-            if (text) {
-              return res.status(200).json({
-                status: 'success',
-                provider: 'openai',
-                text: text.trim()
-              });
-            }
+            const reply = parseModelJson(String(data.choices?.[0]?.message?.content || ''));
+            if (reply) return send('openai', reply, 'gpt-4o-mini');
+          } else {
+            console.warn(`[OpenAI] Falhou com status ${openAiRes.status}.`);
           }
         } catch (openAiError: any) {
           console.warn('Erro ao processar chamada OpenAI no servidor:', openAiError?.message || openAiError);
         }
       }
 
-      // 3. Fallback inteligente com Guardrails estritos e tratamento contextual de intenções
-      const lastMsg = String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').toLowerCase().trim();
-      
-      // Intent 1: Saudações educadas
-      const isGreeting = 
-        /^(oi|ola|olá|opa|bom dia|boa tarde|boa noite|como vai|tudo bem|e ai|e aí|salve|fala|oie)(\s+(como vai|tudo bem|amigo|phoenix|boa tarde|bom dia|boa noite))?[!?.]*$/i.test(lastMsg) ||
-        lastMsg === 'oi como vai' || 
-        lastMsg === 'ola tudo bem' || 
-        lastMsg === 'olá tudo bem' || 
-        lastMsg === 'tudo bem?' || 
-        lastMsg === 'tudo bem' ||
-        lastMsg === 'oi, tudo bem?' ||
-        lastMsg === 'oi como voce esta';
-
-      if (isGreeting) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Olá! Tudo bem? Sou o assistente técnico de vendas da Phoenix Elétrica, em São Paulo. Me diga que tipo de obra ou reforma você vai fazer (ou quais materiais elétricos você já sabe que precisa) e eu te ajudo a estruturar uma lista completa para orçamento!'
-        });
-      }
-
-      // Intent 2: Agradecimentos
-      const isThanks = /^(obrigado|obrigada|valeu|muito obrigado|agradeço|show|beleza|blz|perfeito|otimo|ótimo)[!?.]*$/i.test(lastMsg);
-      if (isThanks) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'À disposição! Se precisar adicionar mais algum material elétrico ou conferir a relação antes de falar com nosso balcão, estou por aqui.'
-        });
-      }
-
-      // Intent 3: Guardrail 1 - Preço e Prazo
-      if (
-        lastMsg.includes('preço') || 
-        lastMsg.includes('quanto custa') || 
-        lastMsg.includes('valor') || 
-        lastMsg.includes('desconto') || 
-        lastMsg.includes('prazo') ||
-        lastMsg.includes('entrega em quanto tempo') ||
-        lastMsg.includes('quanto fica')
-      ) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Nossos preços, descontos e prazos de entrega são calculados diretamente pelo balcão técnico da Phoenix Elétrica. Vamos finalizar os materiais necessários da sua lista primeiro?'
-        });
-      }
-
-      // Intent 4: Guardrail 5 - Finalização da Lista
-      if (
-        lastMsg.includes('finalizar') || 
-        lastMsg.includes('só isso') || 
-        lastMsg.includes('é isso') || 
-        lastMsg.includes('concluir') || 
-        lastMsg.includes('está pronta') ||
-        lastMsg.includes('pode fechar') ||
-        lastMsg === 'pronto' ||
-        lastMsg === 'pode gerar'
-      ) {
-        // Extrai apenas os itens de materiais elétricos solicitados pelo cliente na conversa
-        const ignorePatterns = [
-          /^(oi|ola|olá|bom dia|boa tarde|boa noite|como vai|tudo bem|opa|salve)[!?.]*$/i,
-          /^(finalizar|concluir|fechar|pode fechar|pode finalizar|está pronta|esta pronta|pronto|pronta|gerar lista)[!?.]*$/i,
-          /^(nao|não|apenas|só|so|isso|apenas isso|so isso|só isso|somente isso|não precisa|nao precisa|dispensa|nenhum|nada|nada mais)[!?., ]*$/i,
-          /^(nao|não)[, ]+(apenas|só|so|isso|apenas isso|so isso|só isso|somente isso|nada mais)[!?., ]*$/i,
-          /^(sim|pode ser|ok|beleza|blz|perfeito|otimo|ótimo|obrigado|obrigada|valeu)[!?.]*$/i,
-          /^(quanto custa|qual o preço|qual o preco|quanto fica)[!?.]*$/i
-        ];
-
-        const nonMaterialWords = ['isso', 'apenas', 'so', 'só', 'nada', 'nenhum', 'tudo', 'ok', 'sim', 'nao', 'não', 'pronto', 'obrigado', 'valeu'];
-
-        const userMsgs = messages.filter((m: any) => m.role === 'user' || m.sender === 'user');
-        const candidateItems: string[] = [];
-
-        for (const m of userMsgs) {
-          const raw = String(m.text || m.content || '').trim();
-          if (!raw) continue;
-
-          // Remove emojis gráficos reais no início (ex: 💡, 🔌, ⚡, 🏗️) sem remover números (como 3 rolos)
-          let cleaned = raw.replace(/^[\p{Extended_Pictographic}\s]+/u, '').trim();
-          const lowerCleaned = cleaned.toLowerCase();
-
-          if (
-            lowerCleaned.includes('finalizar') ||
-            lowerCleaned.includes('fechar') ||
-            lowerCleaned.includes('concluir') ||
-            lowerCleaned.includes('só isso') ||
-            lowerCleaned.includes('é isso') ||
-            lowerCleaned.includes('está pronta') ||
-            lowerCleaned.includes('esta pronta') ||
-            ignorePatterns.some(pat => pat.test(lowerCleaned))
-          ) {
-            continue;
-          }
-
-          cleaned = cleaned
-            .replace(/^(nao,\s*apenas|não,\s*apenas|nao\s+apenas|não\s+apenas|apenas|só|so)\s+/i, '')
-            .replace(/^(preciso de|preciso|quero|vou precisar de|vou usar|coloque|adicione|adiciona|me vê|me ve|gostaria de|inclua|incluir)\s+/i, '')
-            .trim();
-
-          if (ignorePatterns.some(pat => pat.test(cleaned.toLowerCase()))) continue;
-
-          if (nonMaterialWords.includes(cleaned.toLowerCase())) continue;
-
-          if (cleaned.length > 2) {
-            const formatted = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
-            if (!candidateItems.some(it => it.toLowerCase() === formatted.toLowerCase())) {
-              candidateItems.push(formatted);
-            }
-          }
-        }
-
-        if (candidateItems.length === 0) {
-          const allUserText = userMsgs.map((m: any) => String(m.text || m.content || '')).join(' ').toLowerCase();
-          if (allUserText.includes('fita')) candidateItems.push('Fita isolante');
-          if (allUserText.includes('led') || allUserText.includes('iluminação') || allUserText.includes('lâmpada')) candidateItems.push('Iluminação LED');
-          if (allUserText.includes('cabo') || allUserText.includes('fio')) candidateItems.push('Cabos elétricos conforme especificação');
-          if (allUserText.includes('disjuntor')) candidateItems.push('Disjuntores termomagnéticos');
-          if (allUserText.includes('tomada') || allUserText.includes('interruptor')) candidateItems.push('Conjuntos de tomadas / interruptores');
-        }
-
-        if (candidateItems.length === 0) {
-          candidateItems.push('Materiais elétricos solicitados na conversa');
-        }
-
-        const consolidated = consolidateMaterials(candidateItems);
-        const finalItems = consolidated.length > 0 ? consolidated : ['Materiais elétricos solicitados na conversa'];
-        const bullets = finalItems.map(item => `• ${item}`).join('\n');
-
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: `Perfeito! Aqui está a sua lista final estruturada para o orçamento:\n\n${bullets}\n\nA lista está pronta para envio! Basta clicar em "Usar esta Lista no Orçamento" para enviar direto ao WhatsApp da Phoenix Elétrica.`
-        });
-      }
-
-      // Termos elétricos e de infraestrutura
-      const electricalTerms = [
-        'cabo', 'fio', 'disjuntor', 'tomada', 'interruptor', 'led', 'lâmpada', 'lampada', 'refletor',
-        'eletroduto', 'corrugado', 'fita', 'isolante', 'quadro', 'distribuição', 'distribuicao', 'trifásico',
-        'bifásico', 'monofásico', 'dr', 'dps', 'barramento', 'canaleta', 'perfilado',
-        'eletrocalha', 'reator', 'contator', 'relé', 'rele', 'conector', 'wago', 'obra', 'instalação',
-        'instalacao', 'reforma', 'energia', 'volts', 'amperes', '110v', '220v', 'dimmer', 'sensor', 'fotocélula',
-        'fotocelula', 'plafon', 'spot', 'soquete', 'chuveiro', 'lista', 'orçamento', 'orcamento', 'materiais', 'fiação',
-        'fiacao', 'conduíte', 'conduite', 'caixinha', '4x2', '4x4', 'curva', 'luva'
-      ];
-
-      // Unidades de medidas e quantidades usadas em materiais elétricos
-      const measurementAndQuantityTerms = [
-        'rolo', 'rolos', 'metro', 'metros', 'm', 'mm', 'mm²', 'peça', 'peças', 'peca', 'pecas',
-        'unidade', 'unidades', 'un', 'barra', 'barras', 'caixa', 'caixas', 'pacote', 'pacotes',
-        'cento', 'kit', 'kits', 'bobina', 'bobinas', 'par', 'pares', 'circuito', 'circuitos'
-      ];
-
-      // Respostas conversacionais a perguntas anteriores (sim, não, apenas, etc.)
-      const conversationalAnswerPatterns = [
-        'sim', 'nao', 'não', 'apenas', 'so', 'só', 'somente', 'pode ser', 'não precisa', 'nao precisa',
-        'dispensa', 'quero', 'vou querer', 'prefiro', 'coloque', 'adicione', 'inclua', 'pode colocar',
-        'pode incluir', 'só isso', 'apenas isso', 'já tenho', 'ja tenho', 'de 100', 'de 50', 'de 25'
-      ];
-
-      // Atributos e especificações técnicas de materiais elétricos
-      const electricalAttributes = [
-        'azul', 'vermelho', 'preto', 'verde', 'amarelo', 'branco', 'cinza',
-        'monopolar', 'bipolar', 'tripolar', 'tetrapolar', 'din', 'nema',
-        '10a', '16a', '20a', '25a', '32a', '40a', '50a', '63a', '70a', '80a', '100a',
-        '110v', '127v', '220v', '380v', 'bivolt', 'monofasico', 'bifasico', 'trifasico',
-        'monofásico', 'bifásico', 'trifásico', '1,5', '2,5', '1.5', '2.5', '4', '6', '10', '16', '25', '35', '50', '70', '95', '120'
-      ];
-
-      const isElectrical = electricalTerms.some(term => lastMsg.includes(term));
-      const hasQuantityOrUnit = measurementAndQuantityTerms.some(term => new RegExp(`\\b${term}\\b`, 'i').test(lastMsg));
-      const hasConversationalAnswer = conversationalAnswerPatterns.some(term => lastMsg.includes(term));
-      const hasElectricalAttribute = electricalAttributes.some(term => new RegExp(`\\b${term}\\b`, 'i').test(lastMsg));
-      const hasNumbers = /\d+/.test(lastMsg);
-
-      // Contexto prévio de materiais elétricos na conversa
-      const previousHistoryText = messages
-        .slice(0, -1)
-        .map((m: any) => String(m.text || m.content || ''))
-        .join(' ')
-        .toLowerCase();
-      const hadElectricalContext = electricalTerms.some(term => previousHistoryText.includes(term));
-
-      const isContextualElectricalReply = 
-        hadElectricalContext && 
-        (hasQuantityOrUnit || hasConversationalAnswer || hasElectricalAttribute || hasNumbers);
-
-      // Intent 5: Guardrail 2 - Assunto não relacionado a materiais elétricos
-      if (!isElectrical && !isContextualElectricalReply) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Sou especialista apenas em materiais elétricos. Como posso ajudar com a sua lista?'
-        });
-      }
-
-      // Intent 6: Tratamento de respostas contextuais de quantidades e especificações (ex: "nao apenas 3 rolos, de 100 m")
-      if (isContextualElectricalReply && !isElectrical) {
-        if (lastMsg.includes('rolo') || lastMsg.includes('metro') || lastMsg.includes('100') || lastMsg.includes('50') || lastMsg.includes('cabo')) {
-          const rawText = String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim();
-          const cleanQty = rawText
-            .replace(/^(preciso de|quero|me vê|vou usar|adicione|adicionar)\s+/i, '')
-            .replace(/^(nao,\s*apenas|não,\s*apenas|apenas|só|so)\s+/i, '')
-            .trim();
-          const hasNegation = lastMsg.includes('nao') || lastMsg.includes('não') || lastMsg.includes('apenas') || lastMsg.includes('dispensa');
-          const negationNote = hasNegation ? ' (sem os itens complementares)' : '';
-
-          return res.status(200).json({
-            status: 'success',
-            provider: 'guardrail-fallback',
-            text: `Entendido! Anotei a quantidade: ${cleanQty} de cabo flexível${negationNote}. Quais bitolas ou cores você vai precisar para esses cabos (ex: 1,5mm² ou 2,5mm² nas cores azul, preto ou vermelho)? Se já estiver tudo definido, posso fechar a lista para o orçamento!`
-          });
-        }
-
-        if (hasElectricalAttribute) {
-          const rawText = String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim();
-          const normSpec = normalizeSpec(rawText);
-          const allPrevText = messages.slice(0, -1).map((m: any) => String(m.text || m.content || '')).join(' ').toLowerCase();
-          const prevQtyMatch = allPrevText.match(/\b(\d+\s*rolos?)\b/i);
-          const qtyPrefix = prevQtyMatch ? `${prevQtyMatch[1]} de cabo flexível ` : '';
-
-          return res.status(200).json({
-            status: 'success',
-            provider: 'guardrail-fallback',
-            text: `Perfeito! Atualizei sua lista com: ${qtyPrefix}${normSpec}. Deseja adicionar mais algum material elétrico à sua relação ou podemos finalizar e gerar a lista para o balcão?`
-          });
-        }
-
-        if (lastMsg.includes('nao') || lastMsg.includes('não') || lastMsg.includes('apenas') || lastMsg.includes('dispensa')) {
-          return res.status(200).json({
-            status: 'success',
-            provider: 'guardrail-fallback',
-            text: `Entendido, mantemos apenas os itens que você solicitou, sem os adicionais. Mais algum material elétrico que deseja incluir ou podemos finalizar a lista para o orçamento?`
-          });
-        }
-
-        if (lastMsg.includes('sim') || lastMsg.includes('pode') || lastMsg.includes('quero') || lastMsg.includes('adicione')) {
-          return res.status(200).json({
-            status: 'success',
-            provider: 'guardrail-fallback',
-            text: `Excelente! Incluí os itens complementares de instalação na sua relação. Quantas peças ou metros estima para cada um? Se preferir, já podemos estruturar a lista para o balcão!`
-          });
-        }
-
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: `Anotado: ${String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim()}. Deseja incluir mais algum item ou podemos fechar a sua lista de materiais elétricos para o balcão da Phoenix Elétrica?`
-        });
-      }
-
-      // Intent 6.5: Reforma Elétrica Residencial ou Predial
-      if (
-        lastMsg.includes('reforma') || 
-        lastMsg.includes('reformar') || 
-        lastMsg.includes('fiação') || 
-        lastMsg.includes('fiacao') || 
-        lastMsg.includes('afiação') || 
-        lastMsg.includes('afiacao') || 
-        lastMsg.includes('casa') || 
-        lastMsg.includes('apartamento') || 
-        lastMsg.includes('residencial')
-      ) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: `Excelente! Para a reforma ou troca de fiação de uma casa com total segurança e conforme as normas da NBR 5410, estruturei esta relação básica de materiais essenciais:\n\n` +
-            `• Cabos flexíveis 750V 1,5mm² (iluminação - cores azul, vermelho/preto e verde)\n` +
-            `• Cabos flexíveis 750V 2,5mm² (tomadas de uso geral TUGs - azul, vermelho e verde)\n` +
-            `• Cabos flexíveis 750V 4mm² ou 6mm² (circuito independente de chuveiro elétrico e ar-condicionado)\n` +
-            `• Quadro de distribuição de embutir (com barramento de cobre tipo pente)\n` +
-            `• Disjuntor geral bipolar/tripolar e mini disjuntores DIN Curva C (10A, 16A, 20A e 32A)\n` +
-            `• Dispositivo DR (IDR 30mA) para proteção obrigatória contra choques elétricos\n` +
-            `• Protetor de Surtos DPS Classe II para proteger eletrodomésticos contra descargas atmosféricas\n` +
-            `• Eletrodutos corrugados reforçados 25mm e 32mm para passagem dos condutores\n` +
-            `• Caixas de embutir 4x2 e 4x4 e conjuntos de tomadas 10A e 20A com placas\n` +
-            `• Fita isolante 3M antichama, passa-fio e conectores de emenda rápida\n\n` +
-            `Quantos cômodos tem a sua casa ou qual a metragem aproximada para estimarmos as quantidades de rolos? Se preferir, você já pode clicar em "Usar Esta Lista no Orçamento" para cotar estes itens no balcão!`
-        });
-      }
-
-      // Intent 7: Sugestões específicas conforme o material mencionado (Guardrail 3 e 4)
-      if (lastMsg.includes('cabo') || lastMsg.includes('fio')) {
-        if (hasNumbers || hasQuantityOrUnit) {
-          return res.status(200).json({
-            status: 'success',
-            provider: 'guardrail-fallback',
-            text: `Perfeito! Anotei: ${String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.content || '').trim()}. Para a instalação desses cabos, você também vai precisar de fita isolante 3M, passa-fio, conectores de emenda (tipo Wago) e eletrodutos corrugados? Quais cores ou bitolas deseja especificar?`
-          });
-        }
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Entendido. Para a passagem dos cabos, você também vai precisar de fita isolante 3M, passa-fio, conectores de emenda (tipo Wago) e eletrodutos corrugados? Quantos metros ou rolos estima para cada circuito?'
-        });
-      }
-
-      if (lastMsg.includes('disjuntor') || lastMsg.includes('quadro')) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Certo. Para o quadro de distribuição, recomendo incluir: Disjuntor Geral, Disjuntores parciais para circuitos, Dispositivo DR (diferencial residual contra choques), DPS contra surtos e barramento de cobre tipo pente. Deseja adicionar barramento e DR?'
-        });
-      }
-
-      if (lastMsg.includes('iluminação') || lastMsg.includes('led') || lastMsg.includes('refletor') || lastMsg.includes('spot')) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Ótimo. Para os pontos de iluminação, além das luminárias/refletores LED, vai precisar de sensores de presença, relés fotocélula, fita isolante e soquetes ou conectores rápidos? Deseja branco frio (6500K) ou branco quente (3000K)?'
-        });
-      }
-
-      if (lastMsg.includes('tomada') || lastMsg.includes('interruptor')) {
-        return res.status(200).json({
-          status: 'success',
-          provider: 'guardrail-fallback',
-          text: 'Perfeito. Para as tomadas e interruptores, vai precisar de conjuntos modulares 10A e 20A (para micro-ondas e chuveiro), além das caixas de embutir 4x2 e 4x4 amarelas reforçadas. Quantas unidades de cada?'
-        });
-      }
-
-      return res.status(200).json({
-        status: 'success',
-        provider: 'guardrail-fallback',
-        text: 'Excelente. Anotei sua solicitação. Para complementar a sua instalação com segurança, recomendo adicionarmos fita isolante 3M e conectores adequados. Mais algum item de infraestrutura ou cabeamento que deseja incluir na lista antes de enviarmos ao balcão?'
-      });
-
+      // 3. Sem IA disponível: anota o que o cliente escreve e segue o mesmo fluxo de confirmação
+      return send('fallback', fallbackReply(messages, prevItems, prevStage));
     } catch (err: any) {
       console.error('Erro na rota /api/chat-assistant:', err);
       return res.status(500).json({
@@ -1234,7 +1106,7 @@ async function startServer() {
       }
 
       if (!lambdaResponse.ok) {
-        console.warn(`[AWS Lambda Proxy] Resposta com status ${lambdaResponse.status}:`, lambdaText);
+        console.warn(`[AWS Lambda Proxy] Resposta com status ${lambdaResponse.status}:`, lambdaText.substring(0, 200));
         return res.status(lambdaResponse.status).json({
           status: 'error',
           message: 'Erro retornado pela AWS Lambda',
@@ -1243,7 +1115,7 @@ async function startServer() {
         });
       }
 
-      console.log(`✓ [AWS Lambda Proxy] Lead enviado com sucesso para ${cleanEmail}:`, lambdaData);
+      console.log(`✓ [AWS Lambda Proxy] Lead enviado (${maskEmail(cleanEmail)}).`);
       return res.status(200).json({
         status: 'success',
         message: 'Lead enviado com sucesso para AWS Lambda'
@@ -1270,7 +1142,7 @@ async function startServer() {
       const rawArquivoUrl = clip(arquivo_url, 500);
       const cleanArquivoUrl = rawArquivoUrl && isAllowedArquivoUrl(rawArquivoUrl) ? rawArquivoUrl : '';
       if (rawArquivoUrl && !cleanArquivoUrl) {
-        console.warn('[ORÇAMENTO] Link de anexo recusado (fora do bucket de anexos):', rawArquivoUrl);
+        console.warn('[ORÇAMENTO] Link de anexo recusado (fora do bucket de anexos).');
       }
       let cleanMateriais = clip(materiais, 10000);
 
@@ -1318,7 +1190,7 @@ async function startServer() {
         saveDbNow();
         const leadId = result[0]?.values[0]?.[0] || Date.now();
 
-        console.log(`[NOVO ORÇAMENTO REGISTRADO] ID: ${leadId} - Cliente: ${cleanNome} - Tel: ${cleanTelefone} - Anexo: ${cleanArquivoNome || 'Nenhum'} - URL: ${cleanArquivoUrl || 'Nenhum'}`);
+        console.log(`[NOVO ORÇAMENTO REGISTRADO] ID: ${leadId} - Cliente: ${maskName(cleanNome)} - Tel: ${maskPhone(cleanTelefone)} - Anexo: ${cleanArquivoNome ? 'sim' : 'não'}`);
 
         return res.status(200).json({
           status: 'success',
@@ -1355,7 +1227,7 @@ async function startServer() {
   });
 
   // Rota GET: Listar orçamentos recebidos (Painel Administrativo)
-  app.get('/api/orcamentos', requireAdmin, (req, res) => {
+  app.get('/api/orcamentos', limitAdmin, requireAdmin, (req, res) => {
     try {
       if (!db) {
         return res.json({ total: 0, leads: [] });
@@ -1400,111 +1272,262 @@ async function startServer() {
     }
   });
 
-  // Rota POST: Login administrativo do lojista
-  app.post('/api/admin/login', (req, res) => {
+  // Rota POST: Login do lojista, etapa 1 (usuário e senha). Devolve a etapa do 2FA, nunca a sessão direto.
+  app.post('/api/admin/login', limitAdmin, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
+      if (req.get(ADMIN_CSRF_HEADER) !== '1') {
+        return res.status(403).json({ success: false, message: 'Requisição recusada.' });
+      }
+      if (!ADMIN_LOGIN_ENABLED || !db) {
+        return res.status(503).json({ success: false, message: 'Login do painel indisponível.' });
+      }
+
       const ip = req.ip || 'desconhecido';
       if (tooManyLoginFailures(ip)) {
         return res.status(429).json({ success: false, message: 'Muitas tentativas. Aguarde 15 minutos.' });
       }
 
-      const { usuario, senha } = req.body;
-      if (!usuario || !senha || typeof usuario !== 'string' || typeof senha !== 'string') {
+      const usuario = clip(req.body?.usuario, 60);
+      const senha = typeof req.body?.senha === 'string' ? req.body.senha.substring(0, 128) : '';
+      if (!usuario || !senha) {
         return res.status(400).json({ success: false, message: 'Informe usuário e senha.' });
       }
 
-      if (!db) {
-        return res.status(500).json({ success: false, message: 'Banco de dados não disponível.' });
+      const row = getAdminRow(usuario);
+      if (row && row.bloqueadoAte > Date.now()) {
+        logAdminEvent(req, usuario, 'login bloqueado', false);
+        saveDbSoon();
+        return res.status(429).json({ success: false, message: 'Acesso bloqueado temporariamente por excesso de tentativas. Tente mais tarde.' });
       }
 
-      const check = db.exec(
-        `SELECT id, usuario, senha FROM admin_auth WHERE LOWER(usuario) = LOWER(?) LIMIT 1`,
-        [usuario.trim()]
-      );
-
-      const found = check && check.length > 0 && check[0].values.length > 0;
-      const storedPassword = found ? String(check[0].values[0][2]) : '';
-      if (!found || !verifyPassword(senha, storedPassword)) {
-        registerLoginFailure(ip);
+      // Usuário inexistente também calcula um hash: a resposta leva o mesmo tempo
+      const passwordOk = verifyPassword(senha, row ? row.senha : DUMMY_PASSWORD_HASH) && !!row;
+      if (!row || !passwordOk) {
+        registerLoginFailure(ip, row);
+        logAdminEvent(req, usuario, 'senha incorreta', false);
+        saveDbSoon();
         return res.status(401).json({ success: false, message: 'Usuário ou senha incorretos.' });
       }
 
-      const usuarioDb = String(check[0].values[0][1]);
-      if (!storedPassword.startsWith('scrypt$')) {
-        db.run(`UPDATE admin_auth SET senha = ? WHERE id = ?`, [hashPassword(senha), check[0].values[0][0]]);
-        fs.writeFileSync(DB_PATH, Buffer.from(db.export()));
+      const updates: string[] = ['falhas_login = 0', 'bloqueado_ate = 0'];
+      const params: any[] = [];
+      if (!row.senha.startsWith('scrypt$')) {
+        updates.push('senha = ?');
+        params.push(hashPassword(senha));
       }
 
-      return res.json({
-        success: true,
-        token: signAdminToken(usuarioDb),
-        usuario: usuarioDb,
-        message: 'Autenticado com sucesso!'
-      });
+      // Primeiro acesso sem 2FA: gera o segredo e mostra o QR Code para cadastrar o celular
+      let enroll: { qr: string; secret: string } | null = null;
+      if (!row.totpAtivo) {
+        const secret = generateTotpSecret();
+        updates.push('totp_pendente = ?');
+        params.push(encryptSecret(secret, SIGNING_SECRET));
+        enroll = { qr: await QRCode.toDataURL(totpUri(secret, row.usuario), { margin: 1, width: 220 }), secret };
+      }
+
+      db.run(`UPDATE admin_auth SET ${updates.join(', ')} WHERE id = ?`, [...params, row.id]);
+      logAdminEvent(req, row.usuario, 'senha correta (aguardando 2FA)', true);
+      saveDbNow();
+
+      const mfaToken = signAdminToken({ p: 'mfa', u: row.usuario, v: row.sessaoVersao, exp: Date.now() + MFA_TOKEN_TTL_MS, ...(enroll ? { e: 1 as const } : {}) });
+      return res.json({ success: true, step: enroll ? 'enroll' : 'mfa', mfaToken, ...(enroll || {}) });
     } catch (err: any) {
       console.error('Erro no login admin:', err);
       return res.status(500).json({ success: false, message: 'Erro interno ao validar login.' });
     }
   });
 
-  // Rota POST: Alterar senha do admin
-  app.post('/api/admin/change-password', requireAdmin, (req, res) => {
+  // Rota POST: Login do lojista, etapa 2 (código do aplicativo autenticador ou código de recuperação)
+  app.post('/api/admin/login/2fa', limitAdmin, (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
-      // Só pode trocar a senha do próprio usuário logado
+      if (req.get(ADMIN_CSRF_HEADER) !== '1') {
+        return res.status(403).json({ success: false, message: 'Requisição recusada.' });
+      }
+      const ip = req.ip || 'desconhecido';
+      if (tooManyLoginFailures(ip)) {
+        return res.status(429).json({ success: false, message: 'Muitas tentativas. Aguarde 15 minutos.' });
+      }
+
+      const pending = verifyAdminToken(clip(req.body?.mfaToken, 2048), 'mfa');
+      const codigo = clip(req.body?.codigo, 20);
+      const row = pending ? getAdminRow(pending.u) : null;
+      if (!pending || !row || row.sessaoVersao !== pending.v || !db) {
+        return res.status(401).json({ success: false, message: 'Etapa expirada. Faça login novamente.', restart: true });
+      }
+
+      // Cada etapa aceita poucas tentativas de código
+      const attempts = (mfaAttempts.get(pending.jti) || 0) + 1;
+      mfaAttempts.set(pending.jti, attempts);
+      setTimeout(() => mfaAttempts.delete(pending.jti), MFA_TOKEN_TTL_MS).unref();
+      if (attempts > MFA_MAX_ATTEMPTS) {
+        return res.status(429).json({ success: false, message: 'Muitas tentativas de código. Faça login novamente.', restart: true });
+      }
+
+      let recoveryCodes: string[] | undefined;
+
+      if (pending.e) {
+        // Cadastro do celular: confere o primeiro código e ativa o 2FA
+        const secret = row.totpPendente ? decryptSecret(row.totpPendente, SIGNING_SECRET) : null;
+        const step = secret ? verifyTotp(secret, codigo, null) : null;
+        if (!secret || step === null) {
+          registerLoginFailure(ip, null);
+          logAdminEvent(req, row.usuario, 'código 2FA incorreto (cadastro)', false);
+          saveDbSoon();
+          return res.status(401).json({ success: false, message: 'Código incorreto. Confira o horário do celular e tente de novo.' });
+        }
+        recoveryCodes = generateRecoveryCodes();
+        db.run(
+          `UPDATE admin_auth SET totp_secret = ?, totp_pendente = NULL, totp_ativo = 1, totp_ultimo_passo = ?, recuperacao = ? WHERE id = ?`,
+          [row.totpPendente, step, JSON.stringify(recoveryCodes.map(hashRecoveryCode)), row.id]
+        );
+        logAdminEvent(req, row.usuario, '2FA ativado', true);
+      } else {
+        const secret = row.totpSecret ? decryptSecret(row.totpSecret, SIGNING_SECRET) : null;
+        const step = secret ? verifyTotp(secret, codigo, row.totpUltimoPasso) : null;
+        if (step !== null) {
+          db.run(`UPDATE admin_auth SET totp_ultimo_passo = ? WHERE id = ?`, [step, row.id]);
+          logAdminEvent(req, row.usuario, 'login com 2FA', true);
+        } else {
+          // Código de recuperação (uso único)
+          const hash = hashRecoveryCode(codigo);
+          const isRecovery = /^[A-F0-9]{5}-?[A-F0-9]{5}$/i.test(codigo) && row.recuperacao.includes(hash);
+          if (!isRecovery) {
+            registerLoginFailure(ip, null);
+            logAdminEvent(req, row.usuario, 'código 2FA incorreto', false);
+            saveDbSoon();
+            return res.status(401).json({ success: false, message: 'Código incorreto.' });
+          }
+          db.run(`UPDATE admin_auth SET recuperacao = ? WHERE id = ?`, [JSON.stringify(row.recuperacao.filter((h) => h !== hash)), row.id]);
+          logAdminEvent(req, row.usuario, 'login com código de recuperação', true);
+        }
+      }
+
+      saveDbNow();
+      mfaAttempts.delete(pending.jti);
+      loginFailuresByIp.delete(ip);
+      issueSession(res, row);
+      return res.json({ success: true, usuario: row.usuario, recoveryCodes });
+    } catch (err: any) {
+      console.error('Erro na verificação 2FA:', err);
+      return res.status(500).json({ success: false, message: 'Erro interno ao validar código.' });
+    }
+  });
+
+  // Rota GET: Sessão atual do painel (usuário, códigos de recuperação restantes)
+  app.get('/api/admin/session', limitAdmin, requireAdmin, (req, res) => {
+    const row = getAdminRow((req as any).adminUser);
+    return res.json({ success: true, usuario: row?.usuario, codigosRecuperacao: row?.recuperacao.length || 0 });
+  });
+
+  // Rota GET: Histórico de acessos ao painel
+  app.get('/api/admin/acessos', limitAdmin, requireAdmin, (_req, res) => {
+    const result = db?.exec(`SELECT data_hora, usuario, ip, navegador, evento, sucesso FROM admin_acessos ORDER BY id DESC LIMIT 40`);
+    const acessos = (result?.[0]?.values || []).map((r: any[]) => ({
+      data_hora: r[0],
+      usuario: r[1],
+      ip: r[2],
+      navegador: r[3],
+      evento: r[4],
+      sucesso: Number(r[5]) === 1
+    }));
+    return res.json({ success: true, acessos });
+  });
+
+  // Rota POST: Sair (apaga o cookie desta sessão)
+  app.post('/api/admin/logout', limitAdmin, (req, res) => {
+    if (req.get(ADMIN_CSRF_HEADER) !== '1') {
+      return res.status(403).json({ success: false, message: 'Requisição recusada.' });
+    }
+    clearSessionCookie(res);
+    return res.json({ success: true });
+  });
+
+  // Rota POST: Encerrar todas as sessões abertas (outros computadores e celulares)
+  app.post('/api/admin/logout-all', limitAdmin, requireAdmin, (req, res) => {
+    const usuario = (req as any).adminUser as string;
+    db!.run(`UPDATE admin_auth SET sessao_versao = sessao_versao + 1 WHERE LOWER(usuario) = LOWER(?)`, [usuario]);
+    logAdminEvent(req, usuario, 'encerrou todas as sessões', true);
+    saveDbNow();
+    clearSessionCookie(res);
+    return res.json({ success: true });
+  });
+
+  // Rota POST: Alterar senha do admin (exige senha atual e código 2FA; derruba as outras sessões)
+  app.post('/api/admin/change-password', limitAdmin, requireAdmin, (req, res) => {
+    try {
       const usuario = (req as any).adminUser as string;
-      const { senhaAtual, novaSenha } = req.body;
-      if (!usuario || !senhaAtual || !novaSenha) {
-        return res.status(400).json({ success: false, message: 'Todos os campos são obrigatórios.' });
+      const senhaAtual = typeof req.body?.senhaAtual === 'string' ? req.body.senhaAtual.substring(0, 128) : '';
+      const novaSenha = typeof req.body?.novaSenha === 'string' ? req.body.novaSenha : '';
+      const codigo = clip(req.body?.codigo, 20);
+      const row = getAdminRow(usuario);
+      if (!row || !senhaAtual || !novaSenha || !codigo) {
+        return res.status(400).json({ success: false, message: 'Preencha a senha atual, a nova senha e o código do aplicativo.' });
       }
 
-      if (String(novaSenha).length < 10) {
-        return res.status(400).json({ success: false, message: 'A nova senha deve ter no mínimo 10 caracteres.' });
-      }
+      const policyError = passwordPolicyError(novaSenha, usuario);
+      if (policyError) return res.status(400).json({ success: false, message: policyError });
 
-      if (!db) {
-        return res.status(500).json({ success: false, message: 'Banco de dados não disponível.' });
-      }
-
-      const check = db.exec(
-        `SELECT id, senha FROM admin_auth WHERE LOWER(usuario) = LOWER(?) LIMIT 1`,
-        [usuario.trim()]
-      );
-
-      if (!check || check.length === 0 || check[0].values.length === 0) {
-        return res.status(401).json({ success: false, message: 'Usuário não encontrado.' });
-      }
-
-      const storedPassword = String(check[0].values[0][1]);
-      if (!verifyPassword(String(senhaAtual), storedPassword)) {
+      if (!verifyPassword(senhaAtual, row.senha)) {
+        logAdminEvent(req, usuario, 'troca de senha: senha atual incorreta', false);
+        saveDbSoon();
         return res.status(401).json({ success: false, message: 'Senha atual incorreta.' });
       }
+      const secret = row.totpSecret ? decryptSecret(row.totpSecret, SIGNING_SECRET) : null;
+      const step = secret ? verifyTotp(secret, codigo, row.totpUltimoPasso) : null;
+      if (step === null) {
+        logAdminEvent(req, usuario, 'troca de senha: código 2FA incorreto', false);
+        saveDbSoon();
+        return res.status(401).json({ success: false, message: 'Código do aplicativo incorreto.' });
+      }
 
-      db.run(
-        `UPDATE admin_auth SET senha = ?, data_modificacao = CURRENT_TIMESTAMP WHERE LOWER(usuario) = LOWER(?)`,
-        [hashPassword(String(novaSenha)), usuario.trim()]
+      db!.run(
+        `UPDATE admin_auth SET senha = ?, totp_ultimo_passo = ?, sessao_versao = sessao_versao + 1, data_modificacao = CURRENT_TIMESTAMP WHERE id = ?`,
+        [hashPassword(novaSenha), step, row.id]
       );
-
-      const data = db.export();
-      fs.writeFileSync(DB_PATH, Buffer.from(data));
-
-      return res.json({ success: true, message: 'Senha alterada com sucesso!' });
+      logAdminEvent(req, usuario, 'senha alterada', true);
+      saveDbNow();
+      // Esta sessão continua; as outras caem
+      issueSession(res, getAdminRow(usuario)!);
+      return res.json({ success: true, message: 'Senha alterada. Outras sessões abertas foram encerradas.' });
     } catch (err: any) {
       console.error('Erro ao alterar senha admin:', err);
       return res.status(500).json({ success: false, message: 'Erro ao alterar senha.' });
     }
   });
 
+  // Rota POST: Gerar novos códigos de recuperação (os antigos deixam de valer)
+  app.post('/api/admin/recovery-codes', limitAdmin, requireAdmin, (req, res) => {
+    const usuario = (req as any).adminUser as string;
+    const row = getAdminRow(usuario);
+    const secret = row?.totpSecret ? decryptSecret(row.totpSecret, SIGNING_SECRET) : null;
+    const step = secret ? verifyTotp(secret, clip(req.body?.codigo, 20), row!.totpUltimoPasso) : null;
+    if (!row || step === null) {
+      return res.status(401).json({ success: false, message: 'Código do aplicativo incorreto.' });
+    }
+    const codes = generateRecoveryCodes();
+    db!.run(`UPDATE admin_auth SET recuperacao = ?, totp_ultimo_passo = ? WHERE id = ?`, [JSON.stringify(codes.map(hashRecoveryCode)), step, row.id]);
+    logAdminEvent(req, usuario, 'novos códigos de recuperação', true);
+    saveDbNow();
+    return res.json({ success: true, recoveryCodes: codes });
+  });
+
   // Rota DELETE: Excluir lead pelo lojista
-  app.delete('/api/orcamentos/:id', requireAdmin, (req, res) => {
+  app.delete('/api/orcamentos/:id', limitAdmin, requireAdmin, (req, res) => {
     try {
-      const id = req.params.id;
+      // Só aceita ID numérico
+      const id = Number(req.params.id);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        return res.status(400).json({ success: false, message: 'ID inválido.' });
+      }
       if (!db) {
         return res.status(500).json({ success: false, message: 'Banco de dados não disponível.' });
       }
 
       db.run(`DELETE FROM clientes_orcamento WHERE id = ?`, [id]);
-      const data = db.export();
-      fs.writeFileSync(DB_PATH, Buffer.from(data));
+      logAdminEvent(req, (req as any).adminUser, `excluiu orçamento #${id}`, true);
+      saveDbNow();
 
       return res.json({ success: true, message: 'Lead excluído com sucesso.' });
     } catch (err: any) {
@@ -1537,7 +1560,7 @@ async function startServer() {
   });
 
   // Rota GET: Métricas Executivas e Dashboard Mensal Consolidado
-  app.get('/api/admin/dashboard', requireAdmin, (req, res) => {
+  app.get('/api/admin/dashboard', limitAdmin, requireAdmin, (req, res) => {
     try {
       if (!db) {
         return res.status(500).json({ error: 'Banco de dados não disponível' });
@@ -1746,7 +1769,7 @@ async function startServer() {
   });
 
   // Rota GET: Listar estatísticas e acessos do site (Painel do Lojista)
-  app.get('/api/visitas', requireAdmin, (req, res) => {
+  app.get('/api/visitas', limitAdmin, requireAdmin, (req, res) => {
     try {
       if (!db) {
         return res.json({ total: 0, hoje: 0, mobile: 0, desktop: 0, visitas: [] });
@@ -1852,9 +1875,12 @@ async function startServer() {
   });
 
   // Rota POST: Adicionar nova avaliação (dinâmica, soma na contagem geral)
-  app.post('/api/avaliacoes', requireAdmin, (req, res) => {
+  app.post('/api/avaliacoes', limitAdmin, requireAdmin, (req, res) => {
     try {
-      const { autor, cargo, nota, comentario } = req.body;
+      const autor = clip(req.body?.autor, 80);
+      const cargo = clip(req.body?.cargo, 80);
+      const nota = req.body?.nota;
+      const comentario = clip(req.body?.comentario, 2000);
 
       if (!autor || !nota || !comentario) {
         return res.status(400).json({
@@ -1864,18 +1890,17 @@ async function startServer() {
       }
 
       const ratingNum = Math.min(5, Math.max(1, parseInt(nota, 10) || 5));
-      const roleStr = cargo?.trim() || 'Cliente Verificado';
+      const roleStr = cargo || 'Cliente Verificado';
       const dateText = 'Recente';
 
       if (db) {
         db.run(
           `INSERT INTO avaliacoes_google (autor, cargo, nota, data_texto, comentario, verificado) VALUES (?, ?, ?, ?, ?, 1)`,
-          [autor.trim(), roleStr, ratingNum, dateText, comentario.trim()]
+          [autor, roleStr, ratingNum, dateText, comentario]
         );
 
         // Persiste imediatamente no arquivo SQLite
-        const data = db.export();
-        fs.writeFileSync(DB_PATH, Buffer.from(data));
+        saveDbNow();
 
         // Recalcula total e média
         const totalRes = db.exec(`SELECT COUNT(*) as total FROM avaliacoes_google`);
@@ -1917,6 +1942,22 @@ async function startServer() {
     res.send(sitemapXml());
   });
 
+  // llms.txt: resumo do site para assistentes de IA (/llm.txt também funciona)
+  const llmsPath = path.join(__dirname, 'public', 'llms.txt');
+  app.get('/llm.txt', (_req, res) => res.type('text/plain; charset=utf-8').setHeader('Cache-Control', 'public, max-age=86400').sendFile(llmsPath));
+
+  // Página do painel: só no endereço secreto. Marca a página para o app abrir o painel em vez da loja.
+  const panelHtml = (html: string) =>
+    renderHead(html, ADMIN_PAGE).replace('</head>', '  <meta name="phx-view" content="panel" />\n  </head>');
+  const sendPanel = (res: express.Response, html: string) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.send(panelHtml(html));
+  };
+  if (!ADMIN_PATH) console.warn('⚠ [ADMIN] ADMIN_PATH não definido: painel desativado.');
+
   // Serve arquivos da pasta /public (ícones, robots.txt): cache de 1 dia
   app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1d' }));
 
@@ -1927,6 +1968,16 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: 'spa',
     });
+    if (ADMIN_PATH) {
+      app.get(ADMIN_PATH, async (req, res, next) => {
+        try {
+          const raw = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8');
+          sendPanel(res, await vite.transformIndexHtml(req.originalUrl, raw));
+        } catch (err) {
+          next(err);
+        }
+      });
+    }
     app.use(vite.middlewares);
   } else {
     // Modo de Produção
@@ -1936,6 +1987,8 @@ async function startServer() {
     // Arquivos de /assets têm hash no nome: cache de 1 ano sem revalidar
     app.use('/assets', express.static(path.join(distPath, 'assets'), { maxAge: '1y', immutable: true }));
     app.use(express.static(distPath, { index: false, maxAge: '1d' }));
+
+    if (ADMIN_PATH) app.get(ADMIN_PATH, (_req, res) => sendPanel(res, indexHtml));
 
     app.all('/api/*', (_req, res) => {
       res.status(404).json({ status: 'error', message: 'Rota não encontrada' });
