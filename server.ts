@@ -661,6 +661,32 @@ async function setupDatabase() {
       console.warn(`⚠ [ADMIN] 2FA reiniciado para "${reset2fa}". Remova ADMIN_RESET_2FA do serviço.`);
     }
 
+    // Login esquecido: ADMIN_RESET_USER + ADMIN_RESET_PASSWORD trocam o usuário e a senha do primeiro login
+    // do painel no próximo início e desligam o 2FA dele. Remova as duas variáveis depois do primeiro acesso,
+    // senão cada reinício volta a aplicar esta senha.
+    const resetUser = String(process.env.ADMIN_RESET_USER || '').trim();
+    const resetPassword = process.env.ADMIN_RESET_PASSWORD || '';
+    if (resetUser || resetPassword) {
+      const resetError = resetUser.length < 4
+        ? 'ADMIN_RESET_USER precisa de no mínimo 4 caracteres.'
+        : passwordPolicyError(resetPassword, resetUser);
+      if (resetError) {
+        console.warn(`⚠ [ADMIN] Reset de login ignorado: ${resetError}`);
+      } else {
+        const primeiro = db.exec(`SELECT MIN(id) FROM admin_auth`)[0]?.values[0]?.[0] as number | null | undefined;
+        if (primeiro) {
+          db.run(`DELETE FROM admin_auth WHERE LOWER(usuario) = LOWER(?) AND id <> ?`, [resetUser, primeiro]);
+          db.run(
+            `UPDATE admin_auth SET usuario = ?, senha = ?, totp_secret = NULL, totp_pendente = NULL, totp_ativo = 0, totp_ultimo_passo = NULL, recuperacao = '[]', sessao_versao = sessao_versao + 1, data_modificacao = CURRENT_TIMESTAMP WHERE id = ?`,
+            [resetUser, hashPassword(resetPassword), primeiro]
+          );
+        } else {
+          db.run(`INSERT INTO admin_auth (usuario, senha) VALUES (?, ?)`, [resetUser, hashPassword(resetPassword)]);
+        }
+        console.warn(`⚠ [ADMIN] Login do painel redefinido para "${resetUser}". Remova ADMIN_RESET_USER e ADMIN_RESET_PASSWORD do serviço.`);
+      }
+    }
+
     // Sem dados de exemplo: pedidos, visitas e cliques vêm apenas do uso real do site
 
     // Remove avaliações de exemplo antigas (não eram avaliações reais do Google)

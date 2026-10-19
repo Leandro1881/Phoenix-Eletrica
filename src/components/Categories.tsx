@@ -189,7 +189,7 @@ const CategoryCard: React.FC<{
       transition={{ duration: 0.55, delay: (index % 3) * 0.1, ease: [0.22, 1, 0.36, 1] }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      className="group snap-start shrink-0 w-[82%] sm:w-[60%] md:w-auto scroll-mt-28 flex flex-col rounded-3xl bg-white ring-1 ring-slate-200/80 overflow-hidden transition-all duration-500 hover:-translate-y-2 hover:shadow-[0_30px_60px_-25px_rgba(18,44,158,0.35)] hover:ring-brand-blue/30"
+      className="group snap-center shrink-0 w-[82vw] sm:w-[60vw] md:w-auto scroll-mt-28 flex flex-col rounded-3xl bg-white ring-1 ring-slate-200/80 overflow-hidden transition-all duration-500 hover:-translate-y-2 hover:shadow-[0_30px_60px_-25px_rgba(18,44,158,0.35)] hover:ring-brand-blue/30"
     >
       <div className="relative aspect-[4/3] overflow-hidden bg-brand-navy">
         <AnimatePresence initial={false}>
@@ -335,7 +335,7 @@ export const Categories: React.FC<CategoriesProps> = ({ onSelectCategory }) => {
         {/* Carrossel com snap no mobile, grade no desktop */}
         <div
           ref={trackRef}
-          className="flex md:grid md:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6 overflow-x-auto md:overflow-visible snap-x snap-mandatory scrollbar-none -mx-4 px-4 md:mx-0 md:px-0 pb-4 md:pb-0"
+          className="flex md:grid md:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6 overflow-x-auto md:overflow-visible snap-x snap-mandatory scrollbar-none -mx-4 sm:-mx-6 px-[9vw] sm:px-[20vw] md:mx-0 md:px-0 pb-4 md:pb-0"
         >
           {CATEGORIES_DATA.map((cat, idx) => (
             <CategoryCard
