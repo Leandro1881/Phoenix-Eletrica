@@ -16,10 +16,11 @@ import { CategoryPage, OtherCategories } from './components/CategoryPage';
 import { NotFound } from './components/NotFound';
 import { findPage, findCategoryPage, NOT_FOUND, QUOTE_PAGE, ADMIN_PAGE } from './seo/pages';
 import { applyHead } from './seo/head';
-import { MessageSquare, Bot } from 'lucide-react';
+import { MessageSquare, ClipboardList, X } from 'lucide-react';
 import { MotionConfig } from 'motion/react';
 import { ReviewsData } from './types';
 import { trackWhatsAppClick } from './utils/analytics';
+import { playChime } from './utils/chime';
 
 // Painel do lojista: baixado só quando aberto, para não pesar no carregamento do site
 const AdminPage = lazy(() => import('./components/AdminPage').then((m) => ({ default: m.AdminPage })));
@@ -27,12 +28,17 @@ const AdminPage = lazy(() => import('./components/AdminPage').then((m) => ({ def
 // Página atual (cada página do site é um endereço próprio, carregado do servidor)
 const currentPage = findPage(window.location.pathname) ?? NOT_FOUND;
 const currentCategoryPage = findCategoryPage(window.location.pathname);
+// Convite do assistente: aparece uma vez por visitante, alguns segundos após a 1ª visita
+const GREETED_KEY = 'phoenix_ai_greeted';
+const GREET_DELAY_MS = 7000;
+
 // O servidor marca a página do painel (endereço secreto); não existe atalho nem endereço fixo no código
 const isPanelPage = document.querySelector('meta[name="phx-view"]')?.getAttribute('content') === 'panel';
 
 export default function App() {
   const [selectedMaterial, setSelectedMaterial] = useState<string>('');
   const [isAiAssistantOpen, setIsAiAssistantOpen] = useState(false);
+  const [showAiTeaser, setShowAiTeaser] = useState(false);
   const [reviewsData, setReviewsData] = useState<ReviewsData>({
     total: 16,
     ratingAverage: 4.8,
@@ -80,6 +86,35 @@ export default function App() {
       }).catch(() => {});
     } catch (_) {}
   }, []);
+
+  // 1ª visita: no computador o assistente abre sozinho; no celular aparece só um balão
+  // (janela cobrindo a tela atrapalha a leitura e é penalizada pelo Google no celular)
+  useEffect(() => {
+    if (isPanelPage) return;
+    try {
+      if (localStorage.getItem(GREETED_KEY)) return;
+    } catch {
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(GREETED_KEY, '1');
+      } catch {}
+      if (window.matchMedia('(min-width: 640px)').matches) setIsAiAssistantOpen(true);
+      else setShowAiTeaser(true);
+      playChime();
+    }, GREET_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Abrir o assistente por conta própria cancela o convite automático
+  useEffect(() => {
+    if (!isAiAssistantOpen) return;
+    setShowAiTeaser(false);
+    try {
+      localStorage.setItem(GREETED_KEY, '1');
+    } catch {}
+  }, [isAiAssistantOpen]);
 
   const navigateToHome = () => {
     window.location.href = '/';
@@ -194,20 +229,46 @@ export default function App() {
         />
       </div>
 
-      {/* Botão Flutuante do Assistente de IA Phoenix (Lado Esquerdo - Parecido com o WhatsApp) */}
+      {/* Convite do assistente no celular (1ª visita) */}
+      {showAiTeaser && !isAiAssistantOpen && (
+        <div className="fixed bottom-22 left-4 right-20 z-40 max-w-[300px] animate-fadeIn">
+          <div className="relative bg-white rounded-2xl rounded-bl-md shadow-2xl ring-1 ring-slate-900/10 p-3 pr-8">
+            <button
+              type="button"
+              onClick={() => setShowAiTeaser(false)}
+              className="absolute top-1.5 right-1.5 p-1.5 text-slate-400 hover:text-slate-700 rounded-full cursor-pointer"
+              aria-label="Fechar convite"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsAiAssistantOpen(true)}
+              className="flex items-center gap-2.5 text-left cursor-pointer"
+            >
+              <img src="/icon-192.png" alt="" width={36} height={36} className="w-9 h-9 rounded-full bg-surface p-1 shrink-0" />
+              <span className="text-sm text-slate-800 leading-snug">
+                Oi! 👋 Quer ajuda para montar sua <strong className="text-brand-blue">lista de materiais</strong>?
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Botão Flutuante do assistente (lado esquerdo, parecido com o do WhatsApp) */}
       <div className="fixed bottom-6 left-6 z-40">
         <button
           type="button"
           onClick={() => setIsAiAssistantOpen((prev) => !prev)}
           className="inline-flex items-center gap-2.5 bg-brand-navy hover:bg-brand-navy-2 text-white p-3.5 sm:px-5 sm:py-3.5 rounded-full shadow-2xl shadow-brand-navy/40 transition-all hover:-translate-y-0.5 active:scale-95 cursor-pointer ring-1 ring-white/15 group"
-          title="Assistente Técnico de IA da Phoenix Elétrica"
-          aria-label="Abrir Assistente de IA"
+          title="Montar lista de materiais"
+          aria-label={isAiAssistantOpen ? 'Fechar conversa' : 'Montar lista de materiais'}
         >
           <div className="relative flex items-center justify-center">
-            <Bot className="w-5 h-5 text-brand-yellow group-hover:rotate-12 transition-transform" />
+            <ClipboardList className="w-5 h-5 text-brand-yellow group-hover:rotate-6 transition-transform" />
             <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-brand-navy animate-pulse" />
           </div>
-          <span className="hidden sm:inline font-bold text-sm">Assistente de IA</span>
+          <span className="hidden sm:inline font-bold text-sm">Montar lista</span>
         </button>
       </div>
 

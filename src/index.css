@@ -41,6 +41,15 @@ body {
     animation: whatsapp-ripple 2.2s infinite cubic-bezier(0.4, 0, 0.6, 1);
   }
 
+  /* Entrada suave de balões e janelas (assistente) */
+  @keyframes fade-in-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fadeIn {
+    animation: fade-in-up 0.25s ease-out both;
+  }
+
   /* Faixa de rolagem infinita (marquee) */
   @keyframes marquee {
     from { transform: translateX(0); }
@@ -110,6 +119,7 @@ body {
   }
   .animate-marquee,
   .animate-glow,
+  .animate-fadeIn,
   .animate-whatsapp-pulse {
     animation: none;
   }
